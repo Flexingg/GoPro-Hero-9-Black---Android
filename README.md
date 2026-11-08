@@ -1,49 +1,74 @@
-# GoPro Hero 9 Black — Android Streaming & Retrospective Clip App
+# GoPro HERO9 Black — Android Streaming & Retrospective Clip App
 
-An Android application designed to pair with a GoPro HERO9 Black over BLE & Wi-Fi, stream live preview footage with ultra-low latency, and retrospectively clip and save the last $X$ seconds in uncompressed full resolution (up to 5K/4K 60fps).
+[![Build & Release Android APK](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/actions/workflows/build.yml/badge.svg)](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/actions/workflows/build.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/Flexingg/GoPro-Hero-9-Black---Android?color=00E5FF)](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/tag/v0.0.1)
 
-Styled using **Oppo's Android 17 (ColorOS 17) Fluid UI / Aquamorphic Design System** featuring **Fluid Cloud (流体云)** dynamic pill status cards, frosted glassmorphism, and Aurora engine spring interactions.
+An Android application engineered to pair with the **GoPro HERO9 Black** over BLE & 5GHz Wi-Fi, stream live preview footage with ultra-low latency, and retrospectively clip and save the last $X$ seconds (15s, 30s, 60s) in full uncompressed resolution (4K 60fps / 5K 30fps).
+
+Styled using **Oppo's Android 17 (ColorOS 17) "Living Flow Design" (流体设计)** featuring **Fluid Cloud (流体云)** dynamic pill status cards, frosted glassmorphism with 1px luminous contour strokes, and spring physics interactions.
+
+---
+
+## 🚀 Download v0.0.1 Release
+
+Download the pre-built APKs directly from the [GitHub v0.0.1 Release](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/tag/v0.0.1):
+
+- 📦 [**Download `app-debug.apk`**](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/download/v0.0.1/app-debug.apk) (Ready for direct sideloading and testing)
+- 📦 [**Download `app-release.apk`**](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/download/v0.0.1/app-release.apk) (Optimized release build)
 
 ---
 
 ## 🎯 Architecture & Technical Highlights
 
 1. **Dual-Radio Connection Pipeline**:
-   - **BLE (Bluetooth Low Energy)**: Discovery, authentication/bonding (`Service UUID 0000fea6-0000-1000-8000-00805f9b34fb`), battery status, and Wi-Fi AP provisioning.
-   - **Wi-Fi AP (`10.5.5.9`)**: Android `WifiNetworkSpecifier` direct socket binding, keeping mobile data active for internet access.
+   - **BLE (Bluetooth Low Energy)**: Autonomous discovery and bonding (`Service UUID 0000fea6-0000-1000-8000-00805f9b34fb`). Dispatches AP enable command `[0x03, 0x17, 0x01, 0x01]` to UUID `b5f90072-...` and reads SSID (`b5f90002-...`) and WPA2 passphrase (`b5f90003-...`).
+   - **Wi-Fi AP (`10.5.5.9:8080`)**: Android `WifiNetworkSpecifier` direct socket binding via `connectivityManager.bindProcessToNetwork(network)`, keeping mobile cellular internet fully active.
 
-2. **Live Video Streaming**:
-   - Camera starts preview via `GET /gopro/camera/stream/start?port=8554`.
-   - Incoming **MPEG-TS over UDP on port 8554** rendered via **AndroidX Media3 (ExoPlayer)** or **LibVLC Android** with hardware `MediaCodec` acceleration.
+2. **Ultra-Low Latency Live Video Streaming**:
+   - Instructs camera to begin preview via `GET /gopro/camera/stream/start?port=8554`.
+   - Incoming **MPEG-TS over UDP on port 8554** rendered with hardware `MediaCodec` acceleration via **AndroidX Media3 (ExoPlayer)** configured with `UdpDataSource` and ultra-low latency load control (100ms - 200ms buffers).
    - Background keep-alive heartbeat dispatched every 2.5 seconds (`GET /gopro/camera/keep_alive`).
 
-3. **Retrospective Full-Resolution Clipping ("Clip Last X Seconds")**:
-   - **Hardware HindSight Integration**: Leverages the GoPro HERO9 GP1 sensor's 15s/30s rolling RAM buffer. Triggering shutter commits the full-resolution (4K60/5K30) buffer directly to SD card without continuous card write wear.
-   - **Local Ring Buffer (Fast Fallback)**: Maintains the last $X$ seconds of preview stream in local circular memory for immediate 0ms extraction and sharing while high-res master transfers in background via Turbo Transfer (`GET /gopro/media/turbo_transfer/on`).
+3. **Dual-Tier Retrospective Clipping ("Clip Last 15s / 30s / 60s")**:
+   - **Instant Preview (0ms)**: Memory circular ring-buffer dumps incoming MPEG-TS stream packets directly to local disk for instant preview and sharing.
+   - **4K60/5K Uncompressed Master**: Triggers the GoPro HERO9 GP1 sensor's **HindSight** hardware buffer flush (`shutter/start` -> flush -> `shutter/stop`), commits the uncompressed master file to camera SD storage, and transfers it to the phone via camera **Turbo Transfer** (`GET /gopro/media/turbo_transfer/on`).
 
-4. **Oppo ColorOS 17 Fluid UI**:
-   - **Fluid Cloud (流体云)**: Top dynamic pill capsule reflecting GoPro telemetry (battery %, SD storage, signal, encoding state).
-   - **Aquamorphic Aesthetics**: Oceanic color palette, translucent frosted glass layers (`blur`), and fluid spring animations.
-
----
-
-## 📂 Repository Structure
-
-```
-├── app/                              # Android Application module
-│   ├── src/main/java/com/flexingg/goprohero9/
-│   │   ├── data/                     # BLE, Wi-Fi Specifier, GoPro HTTP API client
-│   │   ├── player/                   # Media3 UDP / LibVLC Video Stream Decoder
-│   │   ├── buffer/                   # Circular RAM buffer for retrospective clipping
-│   │   └── ui/                       # Jetpack Compose UI (ColorOS 17 Fluid Design)
-└── docs/                             # Detailed protocol specifications & research
-```
+4. **ColorOS 17 Living Flow Design (流体设计)**:
+   - **Fluid Cloud (流体云)**: Top dynamic island capsule displaying camera model, live status, battery pill, and expanding on tap with spring physics to show full telemetry (BLE radio, Wi-Fi IP, HindSight mode, FPS).
+   - **Luminous Frosted Glass**: Multi-layered dark glass surfaces with top-lit 1px luminous contour stroke.
+   - **Spring Physics**: Damped springs for press (stiffness 800, damping 0.8), rebound (stiffness 450, damping 0.55), and dynamic cloud morphs.
+   - **Precision Horizon Indicator**: Live pitch and roll guidance overlay.
 
 ---
 
-## 📚 References & Research
+## 📱 How to Test & Pair with GoPro HERO9 Black
 
-- [Open GoPro Specification](https://gopro.github.io/OpenGoPro/)
-- [gopro/OpenGoPro GitHub](https://github.com/gopro/OpenGoPro)
-- [KonradIT/goprowifihack](https://github.com/KonradIT/goprowifihack)
-- [AndroidX Media3 UDP Playback](https://developer.android.com/jetpack/androidx/releases/media3)
+1. **On your GoPro HERO9 Black**:
+   - Ensure camera Bluetooth and Wireless Connections are turned **ON** (`Preferences` -> `Connections` -> `Wireless Connections: ON`).
+   - Leave camera on the standard video mode (with HindSight enabled in camera preset for 4K master buffering).
+2. **On your Android Device**:
+   - Install `app-debug.apk`.
+   - Launch the app and grant Bluetooth, Location, and Storage permissions.
+   - Tap **"Scan & Pair Camera"**.
+   - The app will automatically discover your HERO9, negotiate BLE bonding, enable the camera's Wi-Fi AP, bind the socket network, and start the live 720p60 UDP viewfinder.
+   - Tap **15s**, **30s**, or **60s** duration pills, then tap the giant glowing **"CLIP"** button to capture retrospective footage!
+
+---
+
+## 🛠️ Building from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/Flexingg/GoPro-Hero-9-Black---Android.git
+cd GoPro-Hero-9-Black---Android
+
+# Build Debug APK
+./gradlew assembleDebug
+
+# Build Release APK
+./gradlew assembleRelease
+```
+
+Compiled APKs will be located in:
+- `app/build/outputs/apk/debug/app-debug.apk`
+- `app/build/outputs/apk/release/app-release.apk`
