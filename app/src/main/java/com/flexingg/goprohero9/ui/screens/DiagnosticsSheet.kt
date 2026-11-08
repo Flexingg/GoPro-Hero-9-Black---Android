@@ -249,6 +249,11 @@ fun DiagnosticsSheet(
                 valueColor = if (uiState.isFirstFrameRendered) LivingFlowTokens.LivingEmerald else Color(0xFFFFB300)
             )
             DiagnosticRow(
+                label = "Player Buffer Read",
+                value = "${diag.pipeBytesRead / 1024} KB read (Pipe Ingested: ${diag.pipeBytesWritten / 1024} KB)",
+                valueColor = if (diag.pipeBytesRead > 0) LivingFlowTokens.LivingCyan else Color(0xFFFFB300)
+            )
+            DiagnosticRow(
                 label = "Detected Resolution",
                 value = uiState.streamResolution.ifEmpty { "Awaiting video stream..." }
             )
@@ -319,6 +324,8 @@ fun DiagnosticsSheet(
                             appendLine("Packets Received: ${diag.packetsReceived} (${diag.bytesReceived} bytes)")
                             appendLine("Bitrate: ${(diag.bitrateKbps / 1000.0).let { "%.2f".format(it) }} Mbps")
                             appendLine("TS Sync Valid: ${diag.hasTsSyncByte}")
+                            appendLine("Pipe Ingested: ${diag.pipeBytesWritten} bytes (${diag.pipeBytesWritten / 1024} KB)")
+                            appendLine("Pipe Read: ${diag.pipeBytesRead} bytes (${diag.pipeBytesRead / 1024} KB)")
                             appendLine("Relay Status: ${diag.relayStatus}")
                             appendLine("HTTP Log: ${diag.lastHttpLog}")
                             appendLine("First Frame Rendered: ${uiState.isFirstFrameRendered}")

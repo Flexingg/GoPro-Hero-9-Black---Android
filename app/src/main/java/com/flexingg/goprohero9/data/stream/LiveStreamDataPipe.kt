@@ -25,20 +25,26 @@ class LiveStreamDataPipe(private val maxQueueSize: Int = 800) {
     private var currentPacket: ByteArray? = null
     private var currentPacketOffset: Int = 0
 
+    val totalBytesWritten = kotlinx.coroutines.flow.MutableStateFlow(0L)
+    val totalBytesRead = kotlinx.coroutines.flow.MutableStateFlow(0L)
+
     @Volatile
-    var isRunning: Boolean = false
+    var isRunning: Boolean = true
         private set
 
     fun open() {
         packetQueue.clear()
         currentPacket = null
         currentPacketOffset = 0
+        totalBytesWritten.value = 0L
+        totalBytesRead.value = 0L
         isRunning = true
         Log.d(TAG, "Stream data pipe opened")
     }
 
     fun write(data: ByteArray, length: Int) {
         if (!isRunning || length <= 0) return
+        totalBytesWritten.value += length
         val chunk = data.copyOf(length)
         // If queue exceeds max capacity (e.g. during initial keyframe search),
         // drop oldest packets to maintain low live latency
@@ -53,11 +59,15 @@ class LiveStreamDataPipe(private val maxQueueSize: Int = 800) {
         }
 
         while (currentPacket == null || currentPacketOffset >= currentPacket!!.size) {
-            if (!isRunning) return C.RESULT_END_OF_INPUT
-            // Block up to 100ms waiting for the next UDP packet from GoPro
-            currentPacket = packetQueue.poll(100, TimeUnit.MILLISECONDS)
+            if (!isRunning && packetQueue.isEmpty()) return C.RESULT_END_OF_INPUT
+            // Block up to 250ms waiting for the next UDP packet from GoPro
+            try {
+                currentPacket = packetQueue.poll(250, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                return C.RESULT_END_OF_INPUT
+            }
             currentPacketOffset = 0
-            if (currentPacket == null && !isRunning) {
+            if (currentPacket == null && !isRunning && packetQueue.isEmpty()) {
                 return C.RESULT_END_OF_INPUT
             }
         }
@@ -73,6 +83,7 @@ class LiveStreamDataPipe(private val maxQueueSize: Int = 800) {
             currentPacketOffset = 0
         }
 
+        totalBytesRead.value += bytesToCopy
         return bytesToCopy
     }
 

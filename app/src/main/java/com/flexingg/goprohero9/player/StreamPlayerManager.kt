@@ -4,18 +4,20 @@ import android.content.Context
 import android.net.Uri
 import android.util.Log
 import androidx.annotation.OptIn
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
+import androidx.media3.common.util.TimestampAdjuster
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.UdpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
-import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import androidx.media3.extractor.ts.TsExtractor
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -55,19 +57,25 @@ class StreamPlayerManager(private val context: Context) {
 
         Log.d(TAG, "Initializing Media3 ExoPlayer for MPEG-TS UDP playback...")
 
-        // Configure low-latency load control for live viewfinder
+        // Configure ultra-low-latency load control for live camera viewfinder (50ms start buffer)
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                400,   // Min buffer ms (fast startup)
-                2000,  // Max buffer ms
-                150,   // Buffer for playback ms
-                300    // Buffer for playback after rebuffer ms
+                200,   // Min buffer ms (fast startup)
+                1000,  // Max buffer ms
+                50,    // Buffer for playback ms (instant first frame)
+                100    // Buffer for playback after rebuffer ms
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
         val player = ExoPlayer.Builder(context)
             .setLoadControl(loadControl)
+            .build()
+
+        // Disable audio track rendering so ExoPlayer video renderer never stalls waiting for audio clock sync
+        player.trackSelectionParameters = player.trackSelectionParameters
+            .buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
             .build()
 
         player.addListener(object : Player.Listener {
@@ -106,6 +114,23 @@ class StreamPlayerManager(private val context: Context) {
         return player
     }
 
+    private fun createExtractorsFactory(): ExtractorsFactory {
+        val tsPayloadFlags = DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
+            DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS or
+            DefaultTsPayloadReaderFactory.FLAG_IGNORE_AAC_STREAM or
+            DefaultTsPayloadReaderFactory.FLAG_IGNORE_SPLICE_INFO_STREAM
+
+        return ExtractorsFactory {
+            arrayOf(
+                TsExtractor(
+                    TsExtractor.MODE_SINGLE_PMT,
+                    TimestampAdjuster(0),
+                    DefaultTsPayloadReaderFactory(tsPayloadFlags)
+                )
+            )
+        }
+    }
+
     /**
      * Starts playback directly from memory pipe (recommended, immune to network routing issues).
      */
@@ -115,17 +140,12 @@ class StreamPlayerManager(private val context: Context) {
         val player = exoPlayer ?: initializePlayer()
 
         try {
+            dataPipe.open()
             player.stop()
             player.clearMediaItems()
 
             val dataSourceFactory = LiveStreamDataSource.Factory(dataPipe)
-            val extractorsFactory = DefaultExtractorsFactory().apply {
-                setTsExtractorFlags(
-                    DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
-                    DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS
-                )
-                setTsExtractorMode(TsExtractor.MODE_SINGLE_PMT)
-            }
+            val extractorsFactory = createExtractorsFactory()
 
             val mediaItem = MediaItem.Builder()
                 .setUri(Uri.parse("gopro://live/stream.ts"))
@@ -138,7 +158,7 @@ class StreamPlayerManager(private val context: Context) {
             player.setMediaSource(mediaSource)
             player.prepare()
             player.playWhenReady = true
-            Log.d(TAG, "ExoPlayer started with LiveStreamDataPipe (MPEG-TS in-memory pipeline)")
+            Log.d(TAG, "ExoPlayer started with LiveStreamDataPipe (MPEG-TS in-memory pipeline, TimestampAdjuster(0))")
         } catch (e: Exception) {
             val msg = "Failed to start in-memory stream: ${e.message}"
             Log.e(TAG, msg, e)
@@ -159,13 +179,7 @@ class StreamPlayerManager(private val context: Context) {
             val udpDataSourceFactory = DataSource.Factory {
                 UdpDataSource(UdpDataSource.DEFAULT_MAX_PACKET_SIZE, 8000)
             }
-            val extractorsFactory = DefaultExtractorsFactory().apply {
-                setTsExtractorFlags(
-                    DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
-                    DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS
-                )
-                setTsExtractorMode(TsExtractor.MODE_SINGLE_PMT)
-            }
+            val extractorsFactory = createExtractorsFactory()
 
             val mediaItem = MediaItem.Builder()
                 .setUri(Uri.parse(streamUri))
@@ -178,7 +192,7 @@ class StreamPlayerManager(private val context: Context) {
             player.setMediaSource(mediaSource)
             player.prepare()
             player.playWhenReady = true
-            Log.d(TAG, "ExoPlayer started for $streamUri (MPEG-TS non-IDR keyframe tolerance enabled)")
+            Log.d(TAG, "ExoPlayer started for $streamUri (MPEG-TS, TimestampAdjuster(0))")
         } catch (e: Exception) {
             val msg = "Failed to open UDP stream: ${e.message}"
             Log.e(TAG, msg)

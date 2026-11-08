@@ -74,6 +74,7 @@ class BoundUdpStreamRelay(
         forwardPort: Int = DEFAULT_FORWARD_PORT
     ) {
         val targetIp = if (cameraIp.startsWith("10.5.5.")) cameraIp else "10.5.5.9"
+        dataPipe.open()
 
         scope.launch(Dispatchers.IO) {
             lifecycleMutex.withLock {

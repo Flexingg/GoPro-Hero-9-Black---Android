@@ -46,7 +46,9 @@ data class DiagnosticsState(
     val gatewayIp: String = "10.5.5.9",
     val boundNetworkInfo: String = "None",
     val isDirectUdpMode: Boolean = false,
-    val isOnHomeWifi: Boolean = false
+    val isOnHomeWifi: Boolean = false,
+    val pipeBytesWritten: Long = 0L,
+    val pipeBytesRead: Long = 0L
 )
 
 data class UiState(
@@ -137,6 +139,22 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                         statusMessage = "Receiving UDP: ${stats.packetsReceived} pkts ($rate Mbps). Decoding TS..."
                     )
                 }
+            }
+        }
+
+        viewModelScope.launch {
+            streamRelay.dataPipe.totalBytesWritten.collect { written ->
+                _uiState.value = _uiState.value.copy(
+                    diagnostics = _uiState.value.diagnostics.copy(pipeBytesWritten = written)
+                )
+            }
+        }
+
+        viewModelScope.launch {
+            streamRelay.dataPipe.totalBytesRead.collect { readBytes ->
+                _uiState.value = _uiState.value.copy(
+                    diagnostics = _uiState.value.diagnostics.copy(pipeBytesRead = readBytes)
+                )
             }
         }
     }
