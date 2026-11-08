@@ -42,6 +42,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        viewModel.onResume()
+    }
+
     private fun checkAndRequestPermissions() {
         val permissionsToRequest = mutableListOf<String>()
 

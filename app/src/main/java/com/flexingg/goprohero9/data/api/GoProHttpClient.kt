@@ -26,20 +26,33 @@ data class GoProMediaFile(
 
 class GoProHttpClient(
     private val scope: CoroutineScope,
-    private val baseIp: String = "10.5.5.9",
+    var baseIp: String = "10.5.5.9",
     private val port: Int = 8080
 ) {
     companion object {
         private const val TAG = "GoProHttpClient"
     }
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
+    private var client = OkHttpClient.Builder()
+        .connectTimeout(4, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    private val baseUrl = "http://$baseIp:$port"
+    fun updateNetwork(network: android.net.Network?) {
+        val builder = OkHttpClient.Builder()
+            .connectTimeout(4, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+
+        if (network != null) {
+            Log.d(TAG, "Binding OkHttpClient to network socketFactory: $network")
+            builder.socketFactory(network.socketFactory)
+        }
+        client = builder.build()
+    }
+
+    private val baseUrl: String get() = "http://$baseIp:$port"
     private val gson = Gson()
     private var keepAliveJob: Job? = null
 
@@ -82,11 +95,16 @@ class GoProHttpClient(
         try {
             val url = "$baseUrl/gopro/camera/stream/start?port=$streamPort"
             val request = Request.Builder().url(url).get().build()
-            client.newCall(request).execute().use { response ->
-                Log.d(TAG, "Start stream response: ${response.code}")
-                startKeepAlive()
-                response.isSuccessful
+            val result = client.newCall(request).execute().use { response ->
+                val code = response.code
+                val body = response.body?.string() ?: ""
+                Log.d(TAG, "Start stream response: code=$code, body=$body")
+                code in 200..299 || body.contains("already", ignoreCase = true)
             }
+            if (result) {
+                startKeepAlive()
+            }
+            result
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start stream: ${e.message}")
             false

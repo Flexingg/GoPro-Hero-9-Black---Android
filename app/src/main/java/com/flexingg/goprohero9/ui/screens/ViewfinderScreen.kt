@@ -205,32 +205,54 @@ fun ViewfinderScreen(
                         fontWeight = FontWeight.Bold
                     )
 
-                    Column(
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
                             .background(Color(0x33000000))
                             .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "SSID: ${uiState.wifiApSsid}",
-                            color = LivingFlowTokens.LivingCyan,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
-                        )
-                        Text(
-                            text = "Password: ${uiState.wifiApPassword}",
-                            color = Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
-                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "SSID: ${uiState.wifiApSsid}",
+                                color = LivingFlowTokens.LivingCyan,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            Text(
+                                text = "Password: ${uiState.wifiApPassword}",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                                .background(Color(0x33FFFFFF))
+                                .clickable {
+                                    val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                                    val clip = android.content.ClipData.newPlainText("GoPro Password", uiState.wifiApPassword)
+                                    clipboard?.setPrimaryClip(clip)
+                                    android.widget.Toast.makeText(context, "Password copied to clipboard!", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "Copy",
+                                color = LivingFlowTokens.LivingCyan,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
 
                     Text(
-                        text = "Connecting via system Wi-Fi specifier...\nIf the prompt doesn't appear, you can join directly in Settings.",
+                        text = "GoPro Wi-Fi has no external internet (normal).\nAndroid routes traffic via 5G unless bound. Once joined, tap 'Start Stream' below to bind and stream directly.",
                         color = Color(0xBBFFFFFF),
                         fontSize = 11.sp,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -249,9 +271,9 @@ fun ViewfinderScreen(
                                 }
                             )
                         }
-                        Box(modifier = Modifier.weight(1f)) {
+                        Box(modifier = Modifier.weight(1.2f)) {
                             LuminousSmallButton(
-                                text = "Start Stream",
+                                text = "Bind & Stream",
                                 icon = Icons.Default.Videocam,
                                 isAccent = true,
                                 onClick = { viewModel.startLiveStream() }

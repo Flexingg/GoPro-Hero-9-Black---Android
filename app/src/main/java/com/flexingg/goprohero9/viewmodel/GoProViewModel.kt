@@ -65,6 +65,9 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
     init {
+        wifiManager.onWifiNetworkBound = { network ->
+            httpClient.updateNetwork(network)
+        }
         observeBle()
         observeWifi()
         observePlayer()
@@ -204,19 +207,34 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(selectedClipDuration = seconds)
     }
 
+    fun onResume() {
+        val wifiNet = wifiManager.bindToActiveWifi()
+        if (wifiNet != null) {
+            httpClient.updateNetwork(wifiNet)
+            wifiManager.checkCameraReachability()
+        }
+    }
+
     fun startLiveStream() {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(statusMessage = "Starting camera live preview stream...")
+            _uiState.value = _uiState.value.copy(statusMessage = "Binding to GoPro Wi-Fi interface...")
+            val wifiNet = wifiManager.bindToActiveWifi()
+            httpClient.updateNetwork(wifiNet)
+            val gw = wifiManager.getGatewayIp()
+            httpClient.baseIp = gw
+
+            _uiState.value = _uiState.value.copy(statusMessage = "Starting camera live preview stream at $gw...")
             val started = httpClient.startStream()
             if (started) {
-                playerManager.startPlaying()
+                playerManager.startPlaying("udp://0.0.0.0:8554")
                 _uiState.value = _uiState.value.copy(
                     isStreaming = true,
+                    isWifiConnected = true,
                     statusMessage = "Live Stream active (720p60 UDP)"
                 )
             } else {
                 _uiState.value = _uiState.value.copy(
-                    statusMessage = "Could not reach camera stream at 10.5.5.9. Retrying..."
+                    statusMessage = "Could not reach camera stream at $gw. Ensure Wi-Fi is connected."
                 )
             }
         }
