@@ -282,12 +282,22 @@ fun ViewfinderScreen(
                         }
                     }
 
-                    Text(
-                        text = "GoPro Wi-Fi has no external internet (normal).\nAndroid routes traffic via 5G unless bound. Once joined, tap 'Bind & Stream' below.",
-                        color = Color(0xBBFFFFFF),
-                        fontSize = 11.sp,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                    )
+                    if (uiState.diagnostics.isOnHomeWifi) {
+                        Text(
+                            text = "⚠️ Currently connected to Home Wi-Fi (${uiState.diagnostics.gatewayIp})!\nPlease tap 'Wi-Fi Settings' below and select '${uiState.wifiApSsid}'.",
+                            color = Color(0xFFFF8A80),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    } else {
+                        Text(
+                            text = "GoPro Wi-Fi has no external internet (normal).\nOnce connected, tap 'Bind & Stream' below to start live preview.",
+                            color = Color(0xBBFFFFFF),
+                            fontSize = 11.sp,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),

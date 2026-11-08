@@ -29,9 +29,15 @@ data class GoProMediaFile(
 
 class GoProHttpClient(
     private val scope: CoroutineScope,
-    var baseIp: String = "10.5.5.9",
-    private val port: Int = 8080
+    initialBaseIp: String = "10.5.5.9"
 ) {
+    var baseIp: String = initialBaseIp
+        set(value) {
+            field = if (value.startsWith("10.5.5.")) value else "10.5.5.9"
+        }
+
+    private val port: Int = 8080
+
     companion object {
         private const val TAG = "GoProHttpClient"
     }

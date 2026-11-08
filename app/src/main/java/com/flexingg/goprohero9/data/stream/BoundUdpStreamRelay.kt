@@ -11,6 +11,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.net.BindException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -35,15 +38,8 @@ data class StreamRelayStats(
 /**
  * Dedicated Network-Bound UDP Stream Receiver & Loopback Relay.
  *
- * Why this is required on Android 10+:
- * 1. Android devices with active mobile data (5G/LTE) drop incoming UDP packets from non-default
- *    Wi-Fi networks unless the socket is explicitly bound via `network.bindSocket(socket)`.
- * 2. Media3 ExoPlayer's `UdpDataSource` has no knowledge of Android `Network` objects and creates
- *    unbound sockets that get routed over cellular or dropped.
- * 3. GoPro AP firewall / NAT requires bidirectional traffic: sending heartbeat packets from the
- *    SAME bound socket that listens on 8554 establishes router NAT pinholes.
- * 4. This relay receives packets on the bound Wi-Fi interface and re-transmits them to localhost
- *    (`127.0.0.1:8555`), where ExoPlayer consumes them with zero routing ambiguity or cellular interference.
+ * Prevents EADDRINUSE through synchronized stop/start lifecycle and retry backoff.
+ * Binds explicitly to the GoPro Wi-Fi interface via `network.bindSocket(socket)`.
  */
 class BoundUdpStreamRelay(
     private val scope: CoroutineScope
@@ -59,6 +55,7 @@ class BoundUdpStreamRelay(
     private val _stats = MutableStateFlow(StreamRelayStats())
     val stats: StateFlow<StreamRelayStats> = _stats.asStateFlow()
 
+    private val lifecycleMutex = Mutex()
     private var ingestSocket: DatagramSocket? = null
     private var forwardSocket: DatagramSocket? = null
     private var relayJob: Job? = null
@@ -72,126 +69,153 @@ class BoundUdpStreamRelay(
         listenPort: Int = DEFAULT_LISTEN_PORT,
         forwardPort: Int = DEFAULT_FORWARD_PORT
     ) {
-        stop()
+        val targetIp = if (cameraIp.startsWith("10.5.5.")) cameraIp else "10.5.5.9"
 
-        _stats.value = StreamRelayStats(
-            isRunning = true,
-            listenPort = listenPort,
-            forwardPort = forwardPort,
-            statusText = "Binding socket to Wi-Fi on port $listenPort..."
-        )
+        scope.launch(Dispatchers.IO) {
+            lifecycleMutex.withLock {
+                stopInternal()
 
-        relayJob = scope.launch(Dispatchers.IO) {
-            var totalPackets = 0L
-            var totalBytes = 0L
-            var lastCalculatedTime = System.currentTimeMillis()
-            var bytesSinceLastCalc = 0L
-
-            try {
-                // 1. Create ingest socket and explicitly bind to Android Wi-Fi Network
-                val sock = DatagramSocket(null)
-                sock.reuseAddress = true
-
-                var boundToNet = false
-                if (network != null) {
-                    try {
-                        network.bindSocket(sock)
-                        boundToNet = true
-                        Log.d(TAG, "Successfully bound DatagramSocket to Wi-Fi network: $network")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "network.bindSocket warning: ${e.message}")
-                    }
-                } else {
-                    Log.w(TAG, "No Wi-Fi Network provided to bindSocket; relying on default routing")
-                }
-
-                sock.bind(InetSocketAddress("0.0.0.0", listenPort))
-                sock.soTimeout = 1000 // 1-second timeout to allow cooperative coroutine cancellation
-                ingestSocket = sock
-
-                // 2. Create forwarder socket targeting localhost loopback
-                val fwd = DatagramSocket()
-                forwardSocket = fwd
-                val loopbackDest = InetSocketAddress(InetAddress.getByName("127.0.0.1"), forwardPort)
-
-                _stats.value = _stats.value.copy(
+                _stats.value = StreamRelayStats(
                     isRunning = true,
-                    isBoundToNetwork = boundToNet,
-                    statusText = "Listening on port $listenPort (Relaying to 127.0.0.1:$forwardPort)..."
+                    listenPort = listenPort,
+                    forwardPort = forwardPort,
+                    statusText = "Binding socket to GoPro Wi-Fi on port $listenPort..."
                 )
 
-                // 3. Launch heartbeat job using this exact bound socket
-                startHeartbeat(sock, cameraIp, listenPort)
+                relayJob = scope.launch(Dispatchers.IO) {
+                    var totalPackets = 0L
+                    var totalBytes = 0L
+                    var lastCalculatedTime = System.currentTimeMillis()
+                    var bytesSinceLastCalc = 0L
 
-                val buffer = ByteArray(BUFFER_SIZE)
-                val packet = DatagramPacket(buffer, buffer.size)
-
-                Log.d(TAG, "UDP Ingest loop running on port $listenPort...")
-
-                while (isActive) {
                     try {
-                        sock.receive(packet)
+                        // 1. Create unbound DatagramSocket with SO_REUSEADDR
+                        val sock = DatagramSocket(null)
+                        sock.reuseAddress = true
 
-                        val length = packet.length
-                        if (length > 0) {
-                            totalPackets++
-                            totalBytes += length
-                            bytesSinceLastCalc += length
-
-                            val firstByte = buffer[0]
-                            val isTs = firstByte == MPEG_TS_SYNC_BYTE
-
-                            val now = System.currentTimeMillis()
-                            val timeDiff = now - lastCalculatedTime
-                            var bitrate = _stats.value.bitrateKbps
-                            if (timeDiff >= 1000) {
-                                bitrate = (bytesSinceLastCalc * 8.0) / (timeDiff) // in kbps
-                                bytesSinceLastCalc = 0L
-                                lastCalculatedTime = now
-                            }
-
-                            _stats.value = _stats.value.copy(
-                                packetsReceived = totalPackets,
-                                bytesReceived = totalBytes,
-                                bitrateKbps = bitrate,
-                                lastPacketTimestamp = now,
-                                lastPacketSizeBytes = length,
-                                hasValidTsSyncByte = isTs,
-                                statusText = "Streaming: $totalPackets pkts (${(bitrate / 1000.0).let { "%.2f".format(it) }} Mbps)"
-                            )
-
-                            // Forward to ExoPlayer on localhost loopback
+                        var boundToNet = false
+                        if (network != null) {
                             try {
-                                val fwdPacket = DatagramPacket(buffer, 0, length, loopbackDest)
-                                fwd.send(fwdPacket)
+                                network.bindSocket(sock)
+                                boundToNet = true
+                                Log.d(TAG, "Bound DatagramSocket to GoPro Wi-Fi network: $network")
                             } catch (e: Exception) {
-                                Log.w(TAG, "Loopback forward warning: ${e.message}")
+                                Log.w(TAG, "network.bindSocket warning: ${e.message}")
                             }
-
-                            // Pass to circular clip buffer
-                            onPacketReceived?.invoke(buffer.copyOf(length), length)
                         }
-                    } catch (e: SocketTimeoutException) {
-                        // Normal timeout every 1s when waiting for packets, loop again
+
+                        // 2. Resilient port binding with retry backoff to eliminate EADDRINUSE
+                        var bound = false
+                        var attempts = 0
+                        var effectivePort = listenPort
+
+                        while (!bound && attempts < 5) {
+                            attempts++
+                            try {
+                                sock.bind(InetSocketAddress("0.0.0.0", effectivePort))
+                                bound = true
+                                Log.d(TAG, "Successfully bound UDP ingest socket on port $effectivePort")
+                            } catch (e: BindException) {
+                                if (attempts >= 5) {
+                                    // If port 8554 is still held by OS, try fallback port 8556
+                                    try {
+                                        effectivePort = 8556
+                                        sock.bind(InetSocketAddress("0.0.0.0", effectivePort))
+                                        bound = true
+                                        Log.w(TAG, "Fell back to alternative port $effectivePort")
+                                    } catch (ex: Exception) {
+                                        throw e
+                                    }
+                                } else {
+                                    Log.w(TAG, "Port $effectivePort busy (attempt $attempts). Waiting 200ms...")
+                                    delay(200)
+                                }
+                            }
+                        }
+
+                        sock.soTimeout = 1000
+                        ingestSocket = sock
+
+                        // 3. Create loopback forwarder targeting localhost
+                        val fwd = DatagramSocket()
+                        forwardSocket = fwd
+                        val loopbackDest = InetSocketAddress(InetAddress.getByName("127.0.0.1"), forwardPort)
+
+                        _stats.value = _stats.value.copy(
+                            isRunning = true,
+                            isBoundToNetwork = boundToNet,
+                            listenPort = effectivePort,
+                            statusText = "Listening on port $effectivePort (Relaying to 127.0.0.1:$forwardPort)..."
+                        )
+
+                        // 4. Start heartbeat loop directly through this bound socket
+                        startHeartbeat(sock, targetIp, effectivePort)
+
+                        val buffer = ByteArray(BUFFER_SIZE)
+                        val packet = DatagramPacket(buffer, buffer.size)
+
+                        Log.d(TAG, "UDP Ingest loop running on port $effectivePort...")
+
+                        while (isActive && !sock.isClosed) {
+                            try {
+                                sock.receive(packet)
+
+                                val length = packet.length
+                                if (length > 0) {
+                                    totalPackets++
+                                    totalBytes += length
+                                    bytesSinceLastCalc += length
+
+                                    val firstByte = buffer[0]
+                                    val isTs = firstByte == MPEG_TS_SYNC_BYTE
+
+                                    val now = System.currentTimeMillis()
+                                    val timeDiff = now - lastCalculatedTime
+                                    var bitrate = _stats.value.bitrateKbps
+                                    if (timeDiff >= 1000) {
+                                        bitrate = (bytesSinceLastCalc * 8.0) / (timeDiff)
+                                        bytesSinceLastCalc = 0L
+                                        lastCalculatedTime = now
+                                    }
+
+                                    _stats.value = _stats.value.copy(
+                                        packetsReceived = totalPackets,
+                                        bytesReceived = totalBytes,
+                                        bitrateKbps = bitrate,
+                                        lastPacketTimestamp = now,
+                                        lastPacketSizeBytes = length,
+                                        hasValidTsSyncByte = isTs,
+                                        statusText = "Streaming: $totalPackets pkts (${(bitrate / 1000.0).let { "%.2f".format(it) }} Mbps)"
+                                    )
+
+                                    // Forward to localhost loopback for Media3 ExoPlayer
+                                    try {
+                                        val fwdPacket = DatagramPacket(buffer, 0, length, loopbackDest)
+                                        fwd.send(fwdPacket)
+                                    } catch (_: Exception) {}
+
+                                    // Pass to circular clip buffer
+                                    onPacketReceived?.invoke(buffer.copyOf(length), length)
+                                }
+                            } catch (e: SocketTimeoutException) {
+                                // Expected timeout, loop to check isActive
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "UDP relay error: ${e.message}", e)
+                        _stats.value = _stats.value.copy(
+                            isRunning = false,
+                            lastError = "${e.javaClass.simpleName}: ${e.message}",
+                            statusText = "Relay error: ${e.message}"
+                        )
+                    } finally {
+                        cleanupSockets()
                     }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in UDP relay loop: ${e.message}", e)
-                _stats.value = _stats.value.copy(
-                    isRunning = false,
-                    lastError = "${e.javaClass.simpleName}: ${e.message}",
-                    statusText = "Relay error: ${e.message}"
-                )
-            } finally {
-                cleanupSockets()
             }
         }
     }
 
-    /**
-     * Sends periodic keepalive pings directly through the bound ingest socket to 10.5.5.9:8554.
-     * HERO9 uses `_GPHD_:1:0:2:0.000000\n`.
-     */
     private fun startHeartbeat(sock: DatagramSocket, cameraIp: String, targetPort: Int) {
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch(Dispatchers.IO) {
@@ -201,15 +225,10 @@ class BoundUdpStreamRelay(
 
             while (isActive && !sock.isClosed) {
                 try {
-                    // Send Hero9 format
-                    val p1 = DatagramPacket(hero9Payload, hero9Payload.size, targetAddr)
-                    sock.send(p1)
-
-                    // Also send legacy format for maximum compatibility across firmwares
-                    val p2 = DatagramPacket(legacyPayload, legacyPayload.size, targetAddr)
-                    sock.send(p2)
+                    sock.send(DatagramPacket(hero9Payload, hero9Payload.size, targetAddr))
+                    sock.send(DatagramPacket(legacyPayload, legacyPayload.size, targetAddr))
                 } catch (e: Exception) {
-                    Log.w(TAG, "Error sending UDP heartbeat ping: ${e.message}")
+                    Log.w(TAG, "Heartbeat ping note: ${e.message}")
                 }
                 delay(1500)
             }
@@ -217,14 +236,15 @@ class BoundUdpStreamRelay(
     }
 
     fun sendImmediateHeartbeat(cameraIp: String = "10.5.5.9", targetPort: Int = DEFAULT_LISTEN_PORT) {
+        val targetIp = if (cameraIp.startsWith("10.5.5.")) cameraIp else "10.5.5.9"
         scope.launch(Dispatchers.IO) {
             val sock = ingestSocket
             if (sock != null && !sock.isClosed) {
                 try {
-                    val targetAddr = InetSocketAddress(InetAddress.getByName(cameraIp), targetPort)
+                    val targetAddr = InetSocketAddress(InetAddress.getByName(targetIp), targetPort)
                     val payload = "_GPHD_:1:0:2:0.000000\n".toByteArray(Charsets.UTF_8)
                     sock.send(DatagramPacket(payload, payload.size, targetAddr))
-                    Log.d(TAG, "Sent immediate heartbeat ping to $cameraIp:$targetPort")
+                    Log.d(TAG, "Sent immediate heartbeat ping to $targetIp:$targetPort")
                 } catch (e: Exception) {
                     Log.w(TAG, "Error sending immediate heartbeat: ${e.message}")
                 }
@@ -233,10 +253,18 @@ class BoundUdpStreamRelay(
     }
 
     fun stop() {
-        relayJob?.cancel()
-        relayJob = null
+        scope.launch(Dispatchers.IO) {
+            lifecycleMutex.withLock {
+                stopInternal()
+            }
+        }
+    }
+
+    private fun stopInternal() {
         heartbeatJob?.cancel()
         heartbeatJob = null
+        relayJob?.cancel()
+        relayJob = null
         cleanupSockets()
         _stats.value = _stats.value.copy(
             isRunning = false,

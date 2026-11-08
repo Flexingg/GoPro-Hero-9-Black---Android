@@ -144,6 +144,60 @@ fun DiagnosticsSheet(
                 }
             }
 
+            // Home Wi-Fi Detection Warning
+            if (diag.isOnHomeWifi) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0x33FF5252))
+                        .border(1.dp, Color(0x66FF5252), RoundedCornerShape(12.dp))
+                        .padding(12.dp)
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = "Home Wi-Fi Warning",
+                                tint = Color(0xFFFF5252),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Text(
+                                text = "Connected to Home Wi-Fi (${diag.gatewayIp})",
+                                color = Color(0xFFFF8A80),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Text(
+                            text = "Your phone is currently routed through your home network (${diag.gatewayIp}), not the GoPro camera. The camera is at 10.5.5.9 on '${uiState.wifiApSsid.ifEmpty { "GoPro AP" }}'. Please switch Wi-Fi networks in Android Settings.",
+                            color = Color(0xFFFFCDD2),
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp
+                        )
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                                .background(Color(0x44FFFFFF))
+                                .clickable {
+                                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
+                                }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "Open Wi-Fi Settings",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+
             // 1. UDP Ingest & Relay Section
             SectionHeader(title = "UDP Ingest & Network Routing")
             DiagnosticRow(
