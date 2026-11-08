@@ -79,8 +79,11 @@ class StreamPlayerManager(private val context: Context) {
         val player = exoPlayer ?: initializePlayer()
 
         try {
+            player.stop()
+            player.clearMediaItems()
+
             val udpDataSourceFactory = DataSource.Factory {
-                UdpDataSource(UdpDataSource.DEFAULT_MAX_PACKET_SIZE, 5000)
+                UdpDataSource(UdpDataSource.DEFAULT_MAX_PACKET_SIZE, 10000)
             }
             val extractorsFactory = DefaultExtractorsFactory()
 

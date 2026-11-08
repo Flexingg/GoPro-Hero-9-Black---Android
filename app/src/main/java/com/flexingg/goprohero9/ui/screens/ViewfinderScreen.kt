@@ -284,6 +284,53 @@ fun ViewfinderScreen(
             }
         }
 
+        // 4b. Stream Ready / Retry Card (When Wi-Fi is connected but stream is not active yet)
+        if (uiState.isWifiConnected && !uiState.isStreaming) {
+            LuminousGlassCard(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(28.dp),
+                shape = RoundedCornerShape(LivingFlowTokens.RadiusMedium),
+                thickness = GlassThickness.THICK
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Videocam,
+                        contentDescription = "Stream",
+                        tint = LivingFlowTokens.LivingCyan,
+                        modifier = Modifier.size(40.dp)
+                    )
+                    Text(
+                        text = "Camera Connected",
+                        color = Color.White,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = uiState.statusMessage,
+                        color = LivingFlowTokens.LivingCyan,
+                        fontSize = 12.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "If GoPro LCD shows 'Pairing Successful', press the camera's side Mode button once to return to video.",
+                        color = Color(0xBBFFFFFF),
+                        fontSize = 11.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    LuminousActionButton(
+                        text = "Start Live Viewfinder",
+                        onClick = { viewModel.startLiveStream() }
+                    )
+                }
+            }
+        }
+
         // 5. Status Notification Pill
         if (uiState.statusMessage.isNotEmpty()) {
             Box(

@@ -224,7 +224,7 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
             httpClient.baseIp = gw
 
             _uiState.value = _uiState.value.copy(statusMessage = "Starting camera live preview stream at $gw...")
-            val started = httpClient.startStream()
+            val (started, msg) = httpClient.startStream()
             if (started) {
                 playerManager.startPlaying("udp://0.0.0.0:8554")
                 _uiState.value = _uiState.value.copy(
@@ -234,7 +234,8 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                 )
             } else {
                 _uiState.value = _uiState.value.copy(
-                    statusMessage = "Could not reach camera stream at $gw. Ensure Wi-Fi is connected."
+                    isStreaming = false,
+                    statusMessage = "Stream notice: $msg. Ensure GoPro is in Video mode."
                 )
             }
         }

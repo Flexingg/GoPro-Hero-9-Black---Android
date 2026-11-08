@@ -90,25 +90,64 @@ class GoProHttpClient(
 
     /**
      * Instructs HERO9 to start live UDP MPEG-TS stream on port 8554.
+     * 1. Sets preset group to 1000 (Video) to dismiss the camera's pairing screen and wake the encoder.
+     * 2. Calls /stream/stop first to eliminate HTTP 409 Conflict from previous sessions.
+     * 3. Calls /stream/start (clean URL first, fallback to ?port=8554).
+     * 4. Treats HTTP 200..299, 409 Conflict (already running), and "already" as SUCCESS.
      */
-    suspend fun startStream(streamPort: Int = 8554): Boolean = withContext(Dispatchers.IO) {
+    suspend fun startStream(): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        // 1. Force camera to Video preset (id=1000) so it leaves pairing menu and activates encoder
         try {
-            val url = "$baseUrl/gopro/camera/stream/start?port=$streamPort"
-            val request = Request.Builder().url(url).get().build()
-            val result = client.newCall(request).execute().use { response ->
-                val code = response.code
-                val body = response.body?.string() ?: ""
-                Log.d(TAG, "Start stream response: code=$code, body=$body")
-                code in 200..299 || body.contains("already", ignoreCase = true)
+            val presetUrl = "$baseUrl/gopro/camera/presets/set_group?id=1000"
+            val presetReq = Request.Builder().url(presetUrl).get().build()
+            client.newCall(presetReq).execute().use { resp ->
+                Log.d(TAG, "Preset set_group=1000 response: ${resp.code}")
             }
-            if (result) {
-                startKeepAlive()
-            }
-            result
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start stream: ${e.message}")
-            false
+            Log.d(TAG, "Preset command note: ${e.message}")
         }
+
+        // 2. Stop any existing preview stream to avoid HTTP 409 Conflict
+        try {
+            val stopUrl = "$baseUrl/gopro/camera/stream/stop"
+            val stopReq = Request.Builder().url(stopUrl).get().build()
+            client.newCall(stopReq).execute().use { resp ->
+                Log.d(TAG, "Stream stop response: ${resp.code}")
+            }
+            delay(200)
+        } catch (e: Exception) {
+            Log.d(TAG, "Stream stop note: ${e.message}")
+        }
+
+        // 3. Start preview stream - try clean endpoint first, then with port parameter
+        val endpoints = listOf(
+            "$baseUrl/gopro/camera/stream/start",
+            "$baseUrl/gopro/camera/stream/start?port=8554"
+        )
+
+        var lastError = ""
+        for (url in endpoints) {
+            try {
+                val request = Request.Builder().url(url).get().build()
+                val (ok, info) = client.newCall(request).execute().use { response ->
+                    val code = response.code
+                    val body = response.body?.string() ?: ""
+                    Log.d(TAG, "Start stream $url: code=$code, body=$body")
+                    val isSuccess = response.isSuccessful || code == 409 || body.contains("already", ignoreCase = true)
+                    Pair(isSuccess, "HTTP $code ${if (code == 409) "(Active)" else body.take(40)}")
+                }
+                if (ok) {
+                    startKeepAlive()
+                    return@withContext Pair(true, info)
+                }
+                lastError = info
+            } catch (e: Exception) {
+                lastError = "${e.javaClass.simpleName}: ${e.message}"
+                Log.e(TAG, "Stream start attempt on $url failed: $lastError")
+            }
+        }
+
+        Pair(false, lastError)
     }
 
     /**
@@ -120,7 +159,7 @@ class GoProHttpClient(
             val url = "$baseUrl/gopro/camera/stream/stop"
             val request = Request.Builder().url(url).get().build()
             client.newCall(request).execute().use { response ->
-                response.isSuccessful
+                response.isSuccessful || response.code == 409
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stop stream: ${e.message}")
