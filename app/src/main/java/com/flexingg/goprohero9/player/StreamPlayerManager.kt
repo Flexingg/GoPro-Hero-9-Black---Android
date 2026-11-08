@@ -33,7 +33,8 @@ sealed class PlayerState {
 class StreamPlayerManager(private val context: Context) {
     companion object {
         private const val TAG = "StreamPlayerManager"
-        const val DEFAULT_STREAM_URI = "udp://0.0.0.0:8554"
+        const val LOOPBACK_STREAM_URI = "udp://127.0.0.1:8555"
+        const val DIRECT_STREAM_URI = "udp://0.0.0.0:8554"
     }
 
     private var exoPlayer: ExoPlayer? = null
@@ -46,10 +47,13 @@ class StreamPlayerManager(private val context: Context) {
     private val _videoResolution = MutableStateFlow("")
     val videoResolution: StateFlow<String> = _videoResolution.asStateFlow()
 
+    private val _lastPlayerError = MutableStateFlow("")
+    val lastPlayerError: StateFlow<String> = _lastPlayerError.asStateFlow()
+
     fun initializePlayer(): ExoPlayer {
         if (exoPlayer != null) return exoPlayer!!
 
-        Log.d(TAG, "Initializing Media3 ExoPlayer for UDP MPEG-TS stream...")
+        Log.d(TAG, "Initializing Media3 ExoPlayer for MPEG-TS UDP playback...")
 
         // Configure load control allowing sufficient buffer to acquire full GOP keyframes
         val loadControl = DefaultLoadControl.Builder()
@@ -79,6 +83,7 @@ class StreamPlayerManager(private val context: Context) {
             override fun onRenderedFirstFrame() {
                 Log.d(TAG, "ExoPlayer rendered first video frame!")
                 _isFirstFrameRendered.value = true
+                _playerState.value = PlayerState.Playing
             }
 
             override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -90,8 +95,10 @@ class StreamPlayerManager(private val context: Context) {
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                Log.e(TAG, "ExoPlayer playback error: ${error.message}", error)
-                _playerState.value = PlayerState.Error(error.message ?: "Playback error")
+                val err = error.message ?: "Playback error (${error.errorCode})"
+                Log.e(TAG, "ExoPlayer playback error: $err", error)
+                _lastPlayerError.value = err
+                _playerState.value = PlayerState.Error(err)
             }
         })
 
@@ -99,8 +106,9 @@ class StreamPlayerManager(private val context: Context) {
         return player
     }
 
-    fun startPlaying(streamUri: String = DEFAULT_STREAM_URI) {
+    fun startPlaying(streamUri: String = LOOPBACK_STREAM_URI) {
         _isFirstFrameRendered.value = false
+        _lastPlayerError.value = ""
         val player = exoPlayer ?: initializePlayer()
 
         try {
@@ -108,7 +116,7 @@ class StreamPlayerManager(private val context: Context) {
             player.clearMediaItems()
 
             val udpDataSourceFactory = DataSource.Factory {
-                UdpDataSource(UdpDataSource.DEFAULT_MAX_PACKET_SIZE, 10000)
+                UdpDataSource(UdpDataSource.DEFAULT_MAX_PACKET_SIZE, 8000)
             }
             val extractorsFactory = DefaultExtractorsFactory().apply {
                 setTsExtractorFlags(
@@ -131,8 +139,10 @@ class StreamPlayerManager(private val context: Context) {
             player.playWhenReady = true
             Log.d(TAG, "ExoPlayer started for $streamUri (MPEG-TS non-IDR keyframe tolerance enabled)")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start UDP playback: ${e.message}")
-            _playerState.value = PlayerState.Error("Failed to open UDP stream: ${e.message}")
+            val msg = "Failed to open UDP stream: ${e.message}"
+            Log.e(TAG, msg)
+            _lastPlayerError.value = msg
+            _playerState.value = PlayerState.Error(msg)
         }
     }
 

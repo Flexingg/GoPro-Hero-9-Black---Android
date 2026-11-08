@@ -1,5 +1,6 @@
 package com.flexingg.goprohero9.data.api
 
+import android.net.Network
 import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.JsonObject
@@ -7,17 +8,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStream
 import java.util.concurrent.TimeUnit
 
 data class GoProMediaFile(
@@ -42,7 +42,10 @@ class GoProHttpClient(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    fun updateNetwork(network: android.net.Network?) {
+    private val _lastHttpLog = MutableStateFlow("Ready")
+    val lastHttpLog: StateFlow<String> = _lastHttpLog.asStateFlow()
+
+    fun updateNetwork(network: Network?) {
         val builder = OkHttpClient.Builder()
             .connectTimeout(4, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
@@ -60,40 +63,36 @@ class GoProHttpClient(
     private var keepAliveJob: Job? = null
 
     /**
-     * Starts the periodic 2.5s keep-alive heartbeat required by HERO9 firmware
-     * to keep the live UDP stream alive and prevent camera standby.
+     * Starts periodic HTTP keep-alive ping loop.
      */
     fun startKeepAlive() {
         stopKeepAlive()
         keepAliveJob = scope.launch(Dispatchers.IO) {
-            Log.d(TAG, "Starting keep-alive heartbeat loop (HTTP + UDP)...")
+            Log.d(TAG, "Starting HTTP keep-alive heartbeat loop...")
             while (isActive) {
-                // 1. HTTP Keep-Alive
+                // 1. OpenGoPro keep_alive
                 try {
                     val request = Request.Builder()
                         .url("$baseUrl/gopro/camera/keep_alive")
                         .get()
                         .build()
                     client.newCall(request).execute().use { response ->
-                        if (!response.isSuccessful) {
-                            Log.w(TAG, "Keep-alive response code: ${response.code}")
+                        if (!response.isSuccessful && response.code != 404) {
+                            Log.w(TAG, "HTTP keep_alive code: ${response.code}")
                         }
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Keep-alive HTTP ping error: ${e.message}")
+                    Log.w(TAG, "HTTP keep_alive note: ${e.message}")
                 }
 
-                // 2. UDP Heartbeat ping to camera to register client port and keep UDP stream flowing
+                // 2. Legacy gpControl status ping (keeps session alive on all GoPro firmwares)
                 try {
-                    val targetAddr = InetAddress.getByName(baseIp)
-                    val pingData = "_GPHD_:0:0:2:0.000000\n".toByteArray(Charsets.UTF_8)
-                    DatagramSocket().use { udpSocket ->
-                        val packet = DatagramPacket(pingData, pingData.size, targetAddr, 8554)
-                        udpSocket.send(packet)
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Keep-alive UDP ping note: ${e.message}")
-                }
+                    val statusReq = Request.Builder()
+                        .url("$baseUrl/gp/gpControl/status")
+                        .get()
+                        .build()
+                    client.newCall(statusReq).execute().use { _ -> }
+                } catch (_: Exception) {}
 
                 delay(2500)
             }
@@ -106,88 +105,112 @@ class GoProHttpClient(
     }
 
     /**
-     * Instructs HERO9 to start live UDP MPEG-TS stream on port 8554.
-     * 1. Sets preset group to 1000 (Video) to dismiss the camera's pairing screen and wake the encoder.
+     * Instructs HERO9 to start live UDP MPEG-TS stream on port 8554:
+     * 1. Forces camera into Video mode (dismisses pairing screen & activates hardware encoder).
      * 2. Calls /stream/stop first to eliminate HTTP 409 Conflict from previous sessions.
-     * 3. Calls /stream/start (clean URL first, fallback to ?port=8554).
-     * 4. Treats HTTP 200..299, 409 Conflict (already running), and "already" as SUCCESS.
+     * 3. Tests start endpoints: OpenGoPro ?port=8554, OpenGoPro default, and legacy gpStream.
+     * 4. Treats HTTP 200..299, 409 Conflict, or "already" as SUCCESS.
      */
     suspend fun startStream(): Pair<Boolean, String> = withContext(Dispatchers.IO) {
-        // 1. Force camera to Video preset (id=1000) so it leaves pairing menu and activates encoder
-        try {
-            val presetUrl = "$baseUrl/gopro/camera/presets/set_group?id=1000"
-            val presetReq = Request.Builder().url(presetUrl).get().build()
-            client.newCall(presetReq).execute().use { resp ->
-                Log.d(TAG, "Preset set_group=1000 response: ${resp.code}")
+        // 1. Force Video mode so camera dismisses pairing/setup UI and wakes video encoder
+        val presetEndpoints = listOf(
+            "$baseUrl/gopro/camera/presets/set_group?id=1000",
+            "$baseUrl/gp/gpControl/command/sub_mode?mode=0",
+            "$baseUrl/gp/gpControl/command/mode?p=0"
+        )
+        for (url in presetEndpoints) {
+            try {
+                val req = Request.Builder().url(url).get().build()
+                client.newCall(req).execute().use { resp ->
+                    Log.d(TAG, "Preset init on $url: code=${resp.code}")
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Preset command note: ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.d(TAG, "Preset command note: ${e.message}")
         }
 
-        // 2. Stop any existing preview stream to avoid HTTP 409 Conflict
-        try {
-            val stopUrl = "$baseUrl/gopro/camera/stream/stop"
-            val stopReq = Request.Builder().url(stopUrl).get().build()
-            client.newCall(stopReq).execute().use { resp ->
-                Log.d(TAG, "Stream stop response: ${resp.code}")
-            }
-            delay(200)
-        } catch (e: Exception) {
-            Log.d(TAG, "Stream stop note: ${e.message}")
+        // 2. Stop any existing stream to prevent 409 conflicts
+        val stopEndpoints = listOf(
+            "$baseUrl/gopro/camera/stream/stop",
+            "$baseUrl/gp/gpControl/execute?p1=gpStream&c1=stop"
+        )
+        for (url in stopEndpoints) {
+            try {
+                val req = Request.Builder().url(url).get().build()
+                client.newCall(req).execute().use { resp ->
+                    Log.d(TAG, "Stream stop cleanup $url: code=${resp.code}")
+                }
+            } catch (_: Exception) {}
         }
+        delay(300)
 
-        // 3. Start preview stream - try clean endpoint first, then with port parameter
+        // 3. Start preview stream - try endpoints in order
         val endpoints = listOf(
+            "$baseUrl/gopro/camera/stream/start?port=8554",
             "$baseUrl/gopro/camera/stream/start",
-            "$baseUrl/gopro/camera/stream/start?port=8554"
+            "$baseUrl/gp/gpControl/execute?p1=gpStream&a1=proto_v2&c1=restart",
+            "$baseUrl/gp/gpControl/execute?p1=gpStream&c1=restart"
         )
 
-        var lastError = ""
+        var lastLog = ""
         for (url in endpoints) {
             try {
                 val request = Request.Builder().url(url).get().build()
                 val (ok, info) = client.newCall(request).execute().use { response ->
                     val code = response.code
                     val body = response.body?.string() ?: ""
-                    Log.d(TAG, "Start stream $url: code=$code, body=$body")
+                    val endpointName = url.substringAfterLast("/")
+                    val summary = "$endpointName -> HTTP $code ${if (code == 409) "(Active)" else body.take(30)}"
+                    Log.d(TAG, "Start stream: $summary")
                     val isSuccess = response.isSuccessful || code == 409 || body.contains("already", ignoreCase = true)
-                    Pair(isSuccess, "HTTP $code ${if (code == 409) "(Active)" else body.take(40)}")
+                    Pair(isSuccess, summary)
                 }
+
+                lastLog = info
+                _lastHttpLog.value = info
+
                 if (ok) {
                     startKeepAlive()
                     return@withContext Pair(true, info)
                 }
-                lastError = info
             } catch (e: Exception) {
-                lastError = "${e.javaClass.simpleName}: ${e.message}"
-                Log.e(TAG, "Stream start attempt on $url failed: $lastError")
+                lastLog = "${e.javaClass.simpleName}: ${e.message}"
+                Log.e(TAG, "Stream start attempt on $url failed: $lastLog")
             }
         }
 
-        Pair(false, lastError)
+        _lastHttpLog.value = lastLog
+        Pair(false, lastLog)
     }
 
     /**
-     * Stops the live UDP stream.
+     * Stops the live stream.
      */
     suspend fun stopStream(): Boolean = withContext(Dispatchers.IO) {
         stopKeepAlive()
-        try {
-            val url = "$baseUrl/gopro/camera/stream/stop"
-            val request = Request.Builder().url(url).get().build()
-            client.newCall(request).execute().use { response ->
-                response.isSuccessful || response.code == 409
+        var ok = false
+        val stopEndpoints = listOf(
+            "$baseUrl/gopro/camera/stream/stop",
+            "$baseUrl/gp/gpControl/execute?p1=gpStream&c1=stop"
+        )
+        for (url in stopEndpoints) {
+            try {
+                val req = Request.Builder().url(url).get().build()
+                client.newCall(req).execute().use { response ->
+                    if (response.isSuccessful || response.code == 409) {
+                        ok = true
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Stop stream note on $url: ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to stop stream: ${e.message}")
-            false
         }
+        _lastHttpLog.value = "Stream Stopped"
+        ok
     }
 
     /**
-     * Retrospective Clip trigger via HindSight:
-     * HERO9 HindSight keeps rolling buffer in RAM. Triggering shutter start and then
-     * stopping after buffer commit commits the uncompressed 4K master clip to SD card.
+     * Retrospective Clip trigger via HindSight.
      */
     suspend fun triggerHindSightClip(durationSeconds: Int = 15): Boolean = withContext(Dispatchers.IO) {
         try {
@@ -209,7 +232,7 @@ class GoProHttpClient(
     }
 
     /**
-     * Query camera media list to find the latest recorded clip.
+     * Query camera media list.
      */
     suspend fun getLatestMediaFile(): GoProMediaFile? = withContext(Dispatchers.IO) {
         try {
@@ -239,9 +262,6 @@ class GoProHttpClient(
         }
     }
 
-    /**
-     * Enables Turbo Transfer on GoPro (boosts transfer speeds up to 10-12 MB/s).
-     */
     suspend fun setTurboTransfer(enable: Boolean): Boolean = withContext(Dispatchers.IO) {
         try {
             val state = if (enable) "on" else "off"
@@ -253,9 +273,6 @@ class GoProHttpClient(
         }
     }
 
-    /**
-     * Downloads a full-resolution clip file from the camera to local destination.
-     */
     suspend fun downloadMediaFile(
         mediaFile: GoProMediaFile,
         destinationFile: File,

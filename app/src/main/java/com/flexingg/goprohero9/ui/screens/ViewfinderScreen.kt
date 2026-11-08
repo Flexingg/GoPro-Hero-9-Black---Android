@@ -33,12 +33,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.BluetoothSearching
-import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.CircularProgressIndicator
@@ -83,6 +83,7 @@ fun ViewfinderScreen(
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     var isGalleryOpen by remember { mutableStateOf(false) }
+    var isDiagnosticsOpen by remember { mutableStateOf(false) }
 
     Box(
         modifier = modifier
@@ -113,24 +114,47 @@ fun ViewfinderScreen(
             modifier = Modifier.align(Alignment.Center)
         )
 
-        // 2. Top ColorOS 17 Fluid Cloud (流体云) Dynamic Island Capsule
-        Box(
+        // 2. Top ColorOS 17 Fluid Cloud (流体云) Dynamic Island Capsule + Diagnostics Button
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = 48.dp, start = 16.dp, end = 16.dp),
-            contentAlignment = Alignment.TopCenter
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            FluidCloudCapsule(
-                cameraName = uiState.cameraName,
-                batteryPercent = uiState.batteryPercent,
-                isStreaming = uiState.isStreaming,
-                isRecording = uiState.isRecording,
-                isWifiConnected = uiState.isWifiConnected,
-                isBleConnected = uiState.isBleConnected,
-                selectedClipDuration = uiState.selectedClipDuration,
-                streamFps = uiState.streamFps,
-                streamResolution = uiState.streamResolution
-            )
+            Box(modifier = Modifier.weight(1f)) {
+                FluidCloudCapsule(
+                    cameraName = uiState.cameraName,
+                    batteryPercent = uiState.batteryPercent,
+                    isStreaming = uiState.isStreaming,
+                    isRecording = uiState.isRecording,
+                    isWifiConnected = uiState.isWifiConnected,
+                    isBleConnected = uiState.isBleConnected,
+                    selectedClipDuration = uiState.selectedClipDuration,
+                    streamFps = uiState.streamFps,
+                    streamResolution = uiState.streamResolution
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // Luminous Diagnostics Inspector Button
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .background(if (isDiagnosticsOpen) LivingFlowTokens.LivingCyan else LivingFlowTokens.DarkGlassBackgroundRegular)
+                    .border(1.dp, LivingFlowTokens.LuminousContourDark, CircleShape)
+                    .clickable { isDiagnosticsOpen = !isDiagnosticsOpen },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Tune,
+                    contentDescription = "Diagnostics",
+                    tint = if (isDiagnosticsOpen) Color.Black else LivingFlowTokens.LivingCyan,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
         }
 
         // 3. Connect prompt if not connected
@@ -160,7 +184,7 @@ fun ViewfinderScreen(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Turn camera ON with Wireless Connections enabled.\nApp will pair via BLE and start 5GHz Wi-Fi streaming.",
+                        text = "Turn camera ON with Wireless Connections enabled.\nApp will pair via BLE and start Wi-Fi streaming.",
                         color = Color(0xBBFFFFFF),
                         fontSize = 12.sp,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -171,7 +195,7 @@ fun ViewfinderScreen(
                         onClick = { viewModel.startDiscovery() }
                     )
 
-                    // Fallback direct stream button if user is already on GoPro Wi-Fi
+                    // Direct stream button if already on GoPro Wi-Fi
                     Text(
                         text = "Already on GoPro Wi-Fi? Start Stream",
                         color = LivingFlowTokens.LivingCyan,
@@ -259,7 +283,7 @@ fun ViewfinderScreen(
                     }
 
                     Text(
-                        text = "GoPro Wi-Fi has no external internet (normal).\nAndroid routes traffic via 5G unless bound. Once joined, tap 'Start Stream' below to bind and stream directly.",
+                        text = "GoPro Wi-Fi has no external internet (normal).\nAndroid routes traffic via 5G unless bound. Once joined, tap 'Bind & Stream' below.",
                         color = Color(0xBBFFFFFF),
                         fontSize = 11.sp,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -330,15 +354,32 @@ fun ViewfinderScreen(
                         fontSize = 11.sp,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
-                    LuminousActionButton(
-                        text = "Start Live Viewfinder",
-                        onClick = { viewModel.startLiveStream() }
-                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            LuminousSmallButton(
+                                text = "Diagnostics",
+                                icon = Icons.Default.Tune,
+                                onClick = { isDiagnosticsOpen = true }
+                            )
+                        }
+                        Box(modifier = Modifier.weight(1.2f)) {
+                            LuminousSmallButton(
+                                text = "Start Live View",
+                                icon = Icons.Default.Videocam,
+                                isAccent = true,
+                                onClick = { viewModel.startLiveStream() }
+                            )
+                        }
+                    }
                 }
             }
         }
 
-        // 5. Status Notification Pill
+        // 5. Status Notification Pill + Tap to Inspect
         if (uiState.statusMessage.isNotEmpty()) {
             Box(
                 modifier = Modifier
@@ -347,15 +388,27 @@ fun ViewfinderScreen(
             ) {
                 LuminousGlassCard(
                     shape = RoundedCornerShape(LivingFlowTokens.RadiusPill),
-                    thickness = GlassThickness.THIN
+                    thickness = GlassThickness.THIN,
+                    modifier = Modifier.clickable { isDiagnosticsOpen = true }
                 ) {
-                    Text(
-                        text = uiState.statusMessage,
-                        color = LivingFlowTokens.LivingCyan,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-                    )
+                    ) {
+                        Text(
+                            text = uiState.statusMessage,
+                            color = LivingFlowTokens.LivingCyan,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = "Inspect",
+                            tint = Color(0x88FFFFFF),
+                            modifier = Modifier.size(12.dp)
+                        )
+                    }
                 }
             }
         }
@@ -435,7 +488,23 @@ fun ViewfinderScreen(
             }
         }
 
-        // 8. Media Gallery Bottom Sheet
+        // 8. Diagnostics Bottom Sheet
+        AnimatedVisibility(
+            visible = isDiagnosticsOpen,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+            DiagnosticsSheet(
+                uiState = uiState,
+                onClose = { isDiagnosticsOpen = false },
+                onSendHeartbeat = { viewModel.sendImmediateHeartbeat() },
+                onRestartStream = { viewModel.startLiveStream() },
+                onToggleUdpMode = { viewModel.toggleUdpMode() }
+            )
+        }
+
+        // 9. Media Gallery Bottom Sheet
         AnimatedVisibility(
             visible = isGalleryOpen,
             enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),

@@ -3,6 +3,7 @@ package com.flexingg.goprohero9.viewmodel
 import android.app.Application
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.net.Network
 import android.os.Environment
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
@@ -11,6 +12,8 @@ import com.flexingg.goprohero9.buffer.CircularClipBuffer
 import com.flexingg.goprohero9.data.api.GoProHttpClient
 import com.flexingg.goprohero9.data.ble.BleConnectionState
 import com.flexingg.goprohero9.data.ble.Hero9BleManager
+import com.flexingg.goprohero9.data.stream.BoundUdpStreamRelay
+import com.flexingg.goprohero9.data.stream.StreamRelayStats
 import com.flexingg.goprohero9.data.wifi.GoProWifiManager
 import com.flexingg.goprohero9.data.wifi.WifiConnectionState
 import com.flexingg.goprohero9.player.PlayerState
@@ -30,6 +33,22 @@ data class SavedClip(
     val timestamp: Long
 )
 
+data class DiagnosticsState(
+    val isRelayRunning: Boolean = false,
+    val isRelayBound: Boolean = false,
+    val packetsReceived: Long = 0L,
+    val bytesReceived: Long = 0L,
+    val bitrateKbps: Double = 0.0,
+    val hasTsSyncByte: Boolean = false,
+    val lastPacketSizeBytes: Int = 0,
+    val relayStatus: String = "Idle",
+    val lastHttpLog: String = "None",
+    val lastPlayerError: String = "",
+    val gatewayIp: String = "10.5.5.9",
+    val boundNetworkInfo: String = "None",
+    val isDirectUdpMode: Boolean = false
+)
+
 data class UiState(
     val cameraName: String = "GoPro HERO9 Black",
     val batteryPercent: Int = 92,
@@ -46,7 +65,8 @@ data class UiState(
     val streamResolution: String = "",
     val isFirstFrameRendered: Boolean = false,
     val statusMessage: String = "Ready to connect",
-    val savedClips: List<SavedClip> = emptyList()
+    val savedClips: List<SavedClip> = emptyList(),
+    val diagnostics: DiagnosticsState = DiagnosticsState()
 )
 
 class GoProViewModel(application: Application) : AndroidViewModel(application) {
@@ -61,19 +81,73 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
     val wifiManager = GoProWifiManager(context, viewModelScope)
     val httpClient = GoProHttpClient(viewModelScope)
     val playerManager = StreamPlayerManager(context)
+    val streamRelay = BoundUdpStreamRelay(viewModelScope)
     val clipBuffer = CircularClipBuffer(context, viewModelScope)
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
     init {
+        // Wire packet feed directly from bound relay to circular retrospective buffer
+        streamRelay.onPacketReceived = { data, length ->
+            clipBuffer.ingestPacket(data, length)
+        }
+
         wifiManager.onWifiNetworkBound = { network ->
             httpClient.updateNetwork(network)
+            updateBoundNetworkInfo(network)
         }
+
         observeBle()
         observeWifi()
         observePlayer()
+        observeStreamRelay()
+        observeHttpClient()
         loadLocalClips()
+    }
+
+    private fun updateBoundNetworkInfo(network: Network?) {
+        val netInfo = network?.toString() ?: "None"
+        _uiState.value = _uiState.value.copy(
+            diagnostics = _uiState.value.diagnostics.copy(boundNetworkInfo = netInfo)
+        )
+    }
+
+    private fun observeStreamRelay() {
+        viewModelScope.launch {
+            streamRelay.stats.collect { stats ->
+                _uiState.value = _uiState.value.copy(
+                    diagnostics = _uiState.value.diagnostics.copy(
+                        isRelayRunning = stats.isRunning,
+                        isRelayBound = stats.isBoundToNetwork,
+                        packetsReceived = stats.packetsReceived,
+                        bytesReceived = stats.bytesReceived,
+                        bitrateKbps = stats.bitrateKbps,
+                        hasTsSyncByte = stats.hasValidTsSyncByte,
+                        lastPacketSizeBytes = stats.lastPacketSizeBytes,
+                        relayStatus = stats.statusText
+                    )
+                )
+
+                // If packets are actively arriving, reflect in status message
+                if (stats.packetsReceived > 0 && !_uiState.value.isFirstFrameRendered) {
+                    val rate = (stats.bitrateKbps / 1000.0).let { "%.1f".format(it) }
+                    _uiState.value = _uiState.value.copy(
+                        statusMessage = "Receiving UDP: ${stats.packetsReceived} pkts ($rate Mbps). Decoding TS..."
+                    )
+                }
+            }
+        }
+    }
+
+    private fun observeHttpClient() {
+        viewModelScope.launch {
+            httpClient.lastHttpLog.collect { log ->
+                _uiState.value = _uiState.value.copy(
+                    diagnostics = _uiState.value.diagnostics.copy(lastHttpLog = log)
+                )
+            }
+        }
     }
 
     private fun observeBle() {
@@ -116,7 +190,6 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                             wifiApPassword = bleState.password,
                             statusMessage = "Wi-Fi AP: ${bleState.ssid} (Pass: ${bleState.password}). Connecting..."
                         )
-                        // Request connection to GoPro's Wi-Fi network
                         wifiManager.connectToAccessPoint(bleState.ssid, bleState.password)
                     }
                     is BleConnectionState.Error -> {
@@ -149,9 +222,9 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                     is WifiConnectionState.Connected -> {
                         _uiState.value = _uiState.value.copy(
                             isWifiConnected = true,
+                            diagnostics = _uiState.value.diagnostics.copy(gatewayIp = wifiState.gatewayIp),
                             statusMessage = "Wi-Fi Connected (${wifiState.gatewayIp}). Starting Live Stream..."
                         )
-                        // Auto-start stream once Wi-Fi socket is established
                         startLiveStream()
                     }
                     is WifiConnectionState.Failed -> {
@@ -191,7 +264,8 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                         _uiState.value = _uiState.value.copy(
                             isStreaming = false,
                             isFirstFrameRendered = false,
-                            statusMessage = "Player Error: ${pState.message}"
+                            statusMessage = "Player Error: ${pState.message}",
+                            diagnostics = _uiState.value.diagnostics.copy(lastPlayerError = pState.message)
                         )
                     }
                 }
@@ -220,6 +294,14 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+
+        viewModelScope.launch {
+            playerManager.lastPlayerError.collect { err ->
+                _uiState.value = _uiState.value.copy(
+                    diagnostics = _uiState.value.diagnostics.copy(lastPlayerError = err)
+                )
+            }
+        }
     }
 
     fun startDiscovery() {
@@ -236,45 +318,81 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setClipDuration(seconds: Int) {
         _uiState.value = _uiState.value.copy(selectedClipDuration = seconds)
+        clipBuffer.setBufferDuration(seconds)
     }
 
     fun onResume() {
         val wifiNet = wifiManager.bindToActiveWifi()
         if (wifiNet != null) {
             httpClient.updateNetwork(wifiNet)
+            updateBoundNetworkInfo(wifiNet)
             wifiManager.checkCameraReachability()
         }
     }
 
-    fun startLiveStream() {
+    /**
+     * Starts live preview stream:
+     * 1. Binds process to active GoPro Wi-Fi interface.
+     * 2. Starts BoundUdpStreamRelay with explicit network socket binding.
+     * 3. Starts in-memory CircularClipBuffer capture.
+     * 4. Commands GoPro camera over HTTP to wake encoder and start streaming.
+     * 5. Launches ExoPlayer on 127.0.0.1:8555 (loopback) to eliminate cellular drops.
+     */
+    fun startLiveStream(useDirectUdp: Boolean = false) {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(statusMessage = "Binding to GoPro Wi-Fi interface...")
+            _uiState.value = _uiState.value.copy(
+                statusMessage = "Binding to GoPro Wi-Fi network interface...",
+                diagnostics = _uiState.value.diagnostics.copy(isDirectUdpMode = useDirectUdp)
+            )
+
             val wifiNet = wifiManager.bindToActiveWifi()
             httpClient.updateNetwork(wifiNet)
+            updateBoundNetworkInfo(wifiNet)
+
             val gw = wifiManager.getGatewayIp()
             httpClient.baseIp = gw
+            _uiState.value = _uiState.value.copy(
+                diagnostics = _uiState.value.diagnostics.copy(gatewayIp = gw)
+            )
 
-            _uiState.value = _uiState.value.copy(statusMessage = "Starting camera live preview stream at $gw...")
-            val (started, msg) = httpClient.startStream()
-            if (started) {
-                playerManager.startPlaying("udp://0.0.0.0:8554")
-                _uiState.value = _uiState.value.copy(
-                    isStreaming = true,
-                    isWifiConnected = true,
-                    statusMessage = "Live Stream active (720p60 UDP)"
+            clipBuffer.startCapture()
+
+            if (!useDirectUdp) {
+                // Relay mode: Bind DatagramSocket to Wi-Fi network on port 8554, forward to 127.0.0.1:8555
+                streamRelay.start(
+                    network = wifiNet,
+                    cameraIp = gw,
+                    listenPort = 8554,
+                    forwardPort = 8555
                 )
             } else {
-                _uiState.value = _uiState.value.copy(
-                    isStreaming = false,
-                    statusMessage = "Stream notice: $msg. Ensure GoPro is in Video mode."
-                )
+                streamRelay.stop()
             }
+
+            _uiState.value = _uiState.value.copy(statusMessage = "Sending Stream Start command to camera ($gw)...")
+            val (started, msg) = httpClient.startStream()
+
+            val streamUri = if (useDirectUdp) {
+                StreamPlayerManager.DIRECT_STREAM_URI
+            } else {
+                StreamPlayerManager.LOOPBACK_STREAM_URI
+            }
+
+            playerManager.startPlaying(streamUri)
+
+            _uiState.value = _uiState.value.copy(
+                isStreaming = true,
+                isWifiConnected = true,
+                statusMessage = if (started) "Stream requested: $msg. Ingesting UDP..." else "Notice: $msg"
+            )
         }
     }
 
     fun stopLiveStream() {
         viewModelScope.launch {
             httpClient.stopStream()
+            streamRelay.stop()
+            clipBuffer.stopCapture()
             playerManager.stop()
             _uiState.value = _uiState.value.copy(
                 isStreaming = false,
@@ -283,10 +401,21 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun sendImmediateHeartbeat() {
+        val gw = _uiState.value.diagnostics.gatewayIp
+        streamRelay.sendImmediateHeartbeat(gw, 8554)
+    }
+
+    fun toggleUdpMode() {
+        val currentDirect = _uiState.value.diagnostics.isDirectUdpMode
+        startLiveStream(useDirectUdp = !currentDirect)
+    }
+
     /**
      * Retrospectively clips the last X seconds (15s, 30s, 60s) in full uncompressed resolution:
      * 1. Triggers camera HindSight buffer flush to commit 4K master uncompressed clip.
      * 2. Queries camera media list and downloads 4K master file via Turbo Transfer.
+     * 3. Concurrently dumps local circular rolling buffer so clip is available instantly.
      */
     fun triggerRetrospectiveClip() {
         val duration = _uiState.value.selectedClipDuration
@@ -298,14 +427,17 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val moviesDir = getClipsDirectory()
 
-            // 1. Camera HindSight full 4K/5K retrospective trigger
+            // Concurrently dump instant local MPEG-TS circular buffer
+            val instantTsFile = File(moviesDir, "GoPro_Instant_${System.currentTimeMillis()}.ts")
+            clipBuffer.dumpBufferToFile(instantTsFile)
+
+            // Camera HindSight full 4K/5K retrospective master trigger
             val hindSightOk = httpClient.triggerHindSightClip(duration)
             if (hindSightOk) {
                 _uiState.value = _uiState.value.copy(
                     statusMessage = "HindSight committed to SD card! Syncing 4K master..."
                 )
 
-                // 2. Query latest recorded file from camera
                 val latestMedia = httpClient.getLatestMediaFile()
                 if (latestMedia != null) {
                     val masterFile = File(moviesDir, "GoPro_Master_${latestMedia.filename}")
@@ -332,8 +464,18 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } else {
                 _uiState.value = _uiState.value.copy(
-                    statusMessage = "Failed to trigger HindSight clip on camera"
+                    statusMessage = "Saved instant stream clip (${instantTsFile.name})"
                 )
+                if (instantTsFile.exists() && instantTsFile.length() > 0) {
+                    val instantClip = SavedClip(
+                        title = "Stream Clip (${duration}s)",
+                        localPath = instantTsFile.absolutePath,
+                        isFullResMaster = false,
+                        fileSizeFormatted = "${instantTsFile.length() / (1024 * 1024)} MB",
+                        timestamp = System.currentTimeMillis()
+                    )
+                    addClip(instantClip)
+                }
             }
 
             _uiState.value = _uiState.value.copy(
@@ -374,6 +516,8 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         httpClient.stopKeepAlive()
+        streamRelay.stop()
+        clipBuffer.stopCapture()
         playerManager.release()
         bleManager.disconnect()
         wifiManager.disconnect()

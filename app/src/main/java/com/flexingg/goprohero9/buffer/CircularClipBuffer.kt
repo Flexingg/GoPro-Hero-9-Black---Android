@@ -4,14 +4,9 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
-import java.net.DatagramPacket
-import java.net.DatagramSocket
 import java.util.ArrayDeque
 
 data class TsPacket(
@@ -20,24 +15,21 @@ data class TsPacket(
 )
 
 /**
- * Circular rolling buffer capturing MPEG-TS packets over UDP.
- * Provides instant 0ms retrospective clip dumps to local disk while the camera's
+ * Circular rolling buffer capturing MPEG-TS packets directly from the unified UDP stream relay.
+ * Provides instant retrospective clip dumps to local disk while the camera's
  * 4K master uncompressed file is retrieved asynchronously via Turbo Transfer.
  */
 class CircularClipBuffer(
     private val context: Context,
-    private val scope: CoroutineScope,
-    private val udpPort: Int = 8554
+    private val scope: CoroutineScope
 ) {
     companion object {
         private const val TAG = "CircularClipBuffer"
-        private const val PACKET_BUFFER_SIZE = 2048
     }
 
     private val deque = ArrayDeque<TsPacket>()
     private var bufferDurationSeconds = 30
-    private var captureJob: Job? = null
-    private var socket: DatagramSocket? = null
+    private var isCapturing = true
 
     fun setBufferDuration(seconds: Int) {
         bufferDurationSeconds = seconds
@@ -45,48 +37,30 @@ class CircularClipBuffer(
     }
 
     fun startCapture() {
-        stopCapture()
-        captureJob = scope.launch(Dispatchers.IO) {
-            try {
-                Log.d(TAG, "Starting UDP packet interceptor on port $udpPort...")
-                val sock = DatagramSocket(null)
-                sock.reuseAddress = true
-                sock.bind(java.net.InetSocketAddress(udpPort))
-                socket = sock
-
-                val receiveBuffer = ByteArray(PACKET_BUFFER_SIZE)
-                val packet = DatagramPacket(receiveBuffer, receiveBuffer.size)
-
-                while (isActive) {
-                    sock.receive(packet)
-                    val copy = packet.data.copyOf(packet.length)
-                    val now = System.currentTimeMillis()
-
-                    synchronized(deque) {
-                        deque.addLast(TsPacket(copy, now))
-                        val cutoff = now - (bufferDurationSeconds * 1000L)
-                        while (deque.isNotEmpty() && deque.first.timestampMs < cutoff) {
-                            deque.removeFirst()
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Circular buffer capture error (port may be in use by player): ${e.message}")
-            }
-        }
+        isCapturing = true
     }
 
     fun stopCapture() {
-        captureJob?.cancel()
-        captureJob = null
-        try {
-            socket?.close()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error closing UDP socket: ${e.message}")
-        }
-        socket = null
+        isCapturing = false
         synchronized(deque) {
             deque.clear()
+        }
+    }
+
+    /**
+     * Ingests a raw MPEG-TS packet received from BoundUdpStreamRelay.
+     */
+    fun ingestPacket(data: ByteArray, length: Int) {
+        if (!isCapturing || length <= 0) return
+        val copy = data.copyOf(length)
+        val now = System.currentTimeMillis()
+
+        synchronized(deque) {
+            deque.addLast(TsPacket(copy, now))
+            val cutoff = now - (bufferDurationSeconds * 1000L)
+            while (deque.isNotEmpty() && deque.first.timestampMs < cutoff) {
+                deque.removeFirst()
+            }
         }
     }
 
