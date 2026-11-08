@@ -52,6 +52,8 @@ class BoundUdpStreamRelay(
         private const val MPEG_TS_SYNC_BYTE: Byte = 0x47
     }
 
+    val dataPipe = LiveStreamDataPipe()
+
     private val _stats = MutableStateFlow(StreamRelayStats())
     val stats: StateFlow<StreamRelayStats> = _stats.asStateFlow()
 
@@ -74,6 +76,7 @@ class BoundUdpStreamRelay(
         scope.launch(Dispatchers.IO) {
             lifecycleMutex.withLock {
                 stopInternal()
+                dataPipe.open()
 
                 _stats.value = StreamRelayStats(
                     isRunning = true,
@@ -188,13 +191,16 @@ class BoundUdpStreamRelay(
                                         statusText = "Streaming: $totalPackets pkts (${(bitrate / 1000.0).let { "%.2f".format(it) }} Mbps)"
                                     )
 
-                                    // Forward to localhost loopback for Media3 ExoPlayer
+                                    // 1. In-memory handoff directly to Media3 ExoPlayer (immune to Android network routing issues)
+                                    dataPipe.write(buffer, length)
+
+                                    // 2. Loopback forwarder fallback
                                     try {
                                         val fwdPacket = DatagramPacket(buffer, 0, length, loopbackDest)
                                         fwd.send(fwdPacket)
                                     } catch (_: Exception) {}
 
-                                    // Pass to circular clip buffer
+                                    // 3. Pass to circular retrospective clip buffer
                                     onPacketReceived?.invoke(buffer.copyOf(length), length)
                                 }
                             } catch (e: SocketTimeoutException) {
@@ -265,6 +271,7 @@ class BoundUdpStreamRelay(
         heartbeatJob = null
         relayJob?.cancel()
         relayJob = null
+        dataPipe.close()
         cleanupSockets()
         _stats.value = _stats.value.copy(
             isRunning = false,

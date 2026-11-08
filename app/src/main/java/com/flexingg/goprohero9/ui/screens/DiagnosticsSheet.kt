@@ -202,7 +202,7 @@ fun DiagnosticsSheet(
             SectionHeader(title = "UDP Ingest & Network Routing")
             DiagnosticRow(
                 label = "Routing Mode",
-                value = if (diag.isDirectUdpMode) "Direct (udp://0.0.0.0:8554)" else "Relay Bound (127.0.0.1:8555)"
+                value = if (diag.isDirectUdpMode) "Direct Socket (udp://0.0.0.0:8554)" else "In-Memory Pipe (Direct Pipeline)"
             )
             DiagnosticRow(
                 label = "Wi-Fi Socket Bound",
@@ -296,7 +296,7 @@ fun DiagnosticsSheet(
             ) {
                 // Toggle Relay vs Direct
                 DiagnosticActionButton(
-                    text = if (diag.isDirectUdpMode) "Switch to Relay" else "Switch to Direct",
+                    text = if (diag.isDirectUdpMode) "Switch to Memory Pipe" else "Switch to Direct UDP",
                     icon = Icons.Default.SwapHoriz,
                     modifier = Modifier.weight(1f),
                     onClick = {
@@ -314,7 +314,7 @@ fun DiagnosticsSheet(
                             appendLine("=== GoPro HERO9 Stream Diagnostics ===")
                             appendLine("Gateway IP: ${diag.gatewayIp}")
                             appendLine("Bound Network: ${diag.boundNetworkInfo}")
-                            appendLine("Mode: ${if (diag.isDirectUdpMode) "Direct (8554)" else "Relay (127.0.0.1:8555)"}")
+                            appendLine("Mode: ${if (diag.isDirectUdpMode) "Direct (8554)" else "Memory Pipe (LiveStreamDataPipe)"}")
                             appendLine("Relay Bound: ${diag.isRelayBound}")
                             appendLine("Packets Received: ${diag.packetsReceived} (${diag.bytesReceived} bytes)")
                             appendLine("Bitrate: ${(diag.bitrateKbps / 1000.0).let { "%.2f".format(it) }} Mbps")

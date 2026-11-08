@@ -414,13 +414,11 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.value = _uiState.value.copy(statusMessage = "Sending Stream Start command to GoPro ($gw)...")
                 val (started, msg) = httpClient.startStream()
 
-                val streamUri = if (useDirectUdp) {
-                    StreamPlayerManager.DIRECT_STREAM_URI
+                if (useDirectUdp) {
+                    playerManager.startPlaying(StreamPlayerManager.DIRECT_STREAM_URI)
                 } else {
-                    StreamPlayerManager.LOOPBACK_STREAM_URI
+                    playerManager.startPlaying(streamRelay.dataPipe)
                 }
-
-                playerManager.startPlaying(streamUri)
 
                 _uiState.value = _uiState.value.copy(
                     isStreaming = true,

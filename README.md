@@ -1,7 +1,7 @@
 # GoPro HERO9 Black — Android Streaming & Retrospective Clip App
 
 [![Build & Release Android APK](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/actions/workflows/build.yml/badge.svg)](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/actions/workflows/build.yml)
-[![GitHub Release](https://img.shields.io/github/v/release/Flexingg/GoPro-Hero-9-Black---Android?color=00E5FF)](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/tag/v0.0.7)
+[![GitHub Release](https://img.shields.io/github/v/release/Flexingg/GoPro-Hero-9-Black---Android?color=00E5FF)](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/tag/v0.0.8)
 
 An Android application engineered to pair with the **GoPro HERO9 Black** over BLE & 5GHz Wi-Fi, stream live preview footage with ultra-low latency, and retrospectively clip and save the last $X$ seconds (15s, 30s, 60s) in full uncompressed resolution (4K 60fps / 5K 30fps).
 
@@ -9,12 +9,12 @@ Styled using **Oppo's Android 17 (ColorOS 17) "Living Flow Design" (流体设计
 
 ---
 
-## 🚀 Download v0.0.7 Release
+## 🚀 Download v0.0.8 Release
 
-Download the pre-built APKs directly from the [GitHub v0.0.7 Release](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/tag/v0.0.7):
+Download the pre-built APKs directly from the [GitHub v0.0.8 Release](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/tag/v0.0.8):
 
-- 📦 [**Download `app-debug.apk`**](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/download/v0.0.7/app-debug.apk) (Ready for direct sideloading and testing)
-- 📦 [**Download `app-release.apk`**](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/download/v0.0.7/app-release.apk) (Optimized release build)
+- 📦 [**Download `app-debug.apk`**](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/download/v0.0.8/app-debug.apk) (Ready for direct sideloading and testing)
+- 📦 [**Download `app-release.apk`**](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/download/v0.0.8/app-release.apk) (Optimized release build)
 
 ---
 
@@ -23,14 +23,15 @@ Download the pre-built APKs directly from the [GitHub v0.0.7 Release](https://gi
 1. **Dual-Radio Connection Pipeline**:
    - **BLE (Bluetooth Low Energy)**: Autonomous discovery and bonding (`Service UUID 0000fea6-0000-1000-8000-00805f9b34fb`). Dispatches AP enable command `[0x03, 0x17, 0x01, 0x01]` to UUID `b5f90072-...` and reads SSID (`b5f90002-...`) and WPA2 passphrase (`b5f90003-...`).
    - **Wi-Fi AP (`10.5.5.9:8080`)**: Android `WifiNetworkSpecifier` direct socket binding via `connectivityManager.bindProcessToNetwork(network)`, keeping mobile cellular internet fully active.
+   - **Home Wi-Fi Route Hijack Shield**: Strict `10.5.5.x` subnet verification prevents the app from binding to home Wi-Fi routers (`192.168.x.x`).
 
-2. **Network-Bound UDP Stream Relay & Loopback Routing**:
-   - Explicitly binds `DatagramSocket` to the Android Wi-Fi `Network` interface using `network.bindSocket(socket)`, preventing Android cellular routing from dropping camera UDP packets.
+2. **Network-Bound Ingest & Zero-Latency In-Memory Pipeline (`LiveStreamDataPipe`)**:
+   - Explicitly binds `DatagramSocket` to the Android Wi-Fi `Network` interface using `network.bindSocket(socket)`, capturing live MPEG-TS packets directly from the GoPro at `10.5.5.9:8554`.
+   - **Direct In-Memory Handoff**: Bypasses local loopback UDP sockets entirely (`127.0.0.1:8555`), avoiding Android `bindProcessToNetwork` loopback route dropouts and kernel buffer overflows.
+   - Custom **`LiveStreamDataSource`** feeds raw TS packets straight from `LiveStreamDataPipe` to Media3 ExoPlayer with low-latency load control (400ms buffer).
    - Dual heartbeat dispatched directly from the bound listening socket:
      - UDP: `_GPHD_:1:0:2:0.000000\n` (HERO9 format) & `_GPHD_:0:0:2:0.000000\n` to `10.5.5.9:8554` every 1.5s to establish router NAT pinholes.
      - HTTP: `GET /gopro/camera/keep_alive` & `/gp/gpControl/status` every 2.5s.
-   - Relays incoming MPEG-TS packets to `127.0.0.1:8555` (localhost loopback) where Media3 ExoPlayer consumes them with zero interface conflicts.
-   - Live stream initiation tries modern OpenGoPro endpoints (`/stream/start?port=8554`, `/stream/start`) and legacy gpStream fallbacks.
 
 3. **In-App Living Flow Diagnostics & Network Inspector**:
    - Real-time packet telemetry: Ingested packet count, live bitrate (Mbps), MPEG-TS sync byte verification (`0x47`), and ExoPlayer frame rendering status.

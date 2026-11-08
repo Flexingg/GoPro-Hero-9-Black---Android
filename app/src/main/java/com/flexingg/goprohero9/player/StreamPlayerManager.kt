@@ -55,13 +55,13 @@ class StreamPlayerManager(private val context: Context) {
 
         Log.d(TAG, "Initializing Media3 ExoPlayer for MPEG-TS UDP playback...")
 
-        // Configure load control allowing sufficient buffer to acquire full GOP keyframes
+        // Configure low-latency load control for live viewfinder
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                1500,  // Min buffer ms
-                5000,  // Max buffer ms
-                250,   // Buffer for playback ms
-                500    // Buffer for playback after rebuffer ms
+                400,   // Min buffer ms (fast startup)
+                2000,  // Max buffer ms
+                150,   // Buffer for playback ms
+                300    // Buffer for playback after rebuffer ms
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
@@ -104,6 +104,47 @@ class StreamPlayerManager(private val context: Context) {
 
         exoPlayer = player
         return player
+    }
+
+    /**
+     * Starts playback directly from memory pipe (recommended, immune to network routing issues).
+     */
+    fun startPlaying(dataPipe: com.flexingg.goprohero9.data.stream.LiveStreamDataPipe) {
+        _isFirstFrameRendered.value = false
+        _lastPlayerError.value = ""
+        val player = exoPlayer ?: initializePlayer()
+
+        try {
+            player.stop()
+            player.clearMediaItems()
+
+            val dataSourceFactory = LiveStreamDataSource.Factory(dataPipe)
+            val extractorsFactory = DefaultExtractorsFactory().apply {
+                setTsExtractorFlags(
+                    DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
+                    DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS
+                )
+                setTsExtractorMode(TsExtractor.MODE_SINGLE_PMT)
+            }
+
+            val mediaItem = MediaItem.Builder()
+                .setUri(Uri.parse("gopro://live/stream.ts"))
+                .setMimeType(MimeTypes.VIDEO_MP2T)
+                .build()
+
+            val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory, extractorsFactory)
+                .createMediaSource(mediaItem)
+
+            player.setMediaSource(mediaSource)
+            player.prepare()
+            player.playWhenReady = true
+            Log.d(TAG, "ExoPlayer started with LiveStreamDataPipe (MPEG-TS in-memory pipeline)")
+        } catch (e: Exception) {
+            val msg = "Failed to start in-memory stream: ${e.message}"
+            Log.e(TAG, msg, e)
+            _lastPlayerError.value = msg
+            _playerState.value = PlayerState.Error(msg)
+        }
     }
 
     fun startPlaying(streamUri: String = LOOPBACK_STREAM_URI) {
