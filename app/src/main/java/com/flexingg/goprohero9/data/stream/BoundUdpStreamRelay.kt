@@ -5,6 +5,7 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,6 +19,7 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.SocketException
 import java.net.SocketTimeoutException
 
 data class StreamRelayStats(
@@ -91,74 +93,69 @@ class BoundUdpStreamRelay(
                     var lastCalculatedTime = System.currentTimeMillis()
                     var bytesSinceLastCalc = 0L
 
-                    try {
-                        // 1. Create unbound DatagramSocket with SO_REUSEADDR
-                        val sock = DatagramSocket(null)
-                        sock.reuseAddress = true
+                    // 1. Create unbound DatagramSocket with SO_REUSEADDR
+                    val sock = DatagramSocket(null).apply {
+                        reuseAddress = true
+                    }
 
-                        var boundToNet = false
-                        if (network != null) {
-                            try {
-                                network.bindSocket(sock)
-                                boundToNet = true
-                                Log.d(TAG, "Bound DatagramSocket to GoPro Wi-Fi network: $network")
-                            } catch (e: Exception) {
-                                Log.w(TAG, "network.bindSocket warning: ${e.message}")
-                            }
+                    var boundToNet = false
+                    if (network != null) {
+                        try {
+                            network.bindSocket(sock)
+                            boundToNet = true
+                            Log.d(TAG, "Bound DatagramSocket to GoPro Wi-Fi network: $network")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "network.bindSocket warning: ${e.message}")
                         }
+                    }
 
-                        // 2. Resilient port binding with retry backoff to eliminate EADDRINUSE
-                        var bound = false
-                        var attempts = 0
-                        var effectivePort = listenPort
+                    // 2. Resilient port binding with retry backoff to eliminate EADDRINUSE
+                    var bound = false
+                    var attempts = 0
+                    var effectivePort = listenPort
 
-                        while (!bound && attempts < 5) {
-                            attempts++
-                            try {
-                                sock.bind(InetSocketAddress("0.0.0.0", effectivePort))
-                                bound = true
-                                Log.d(TAG, "Successfully bound UDP ingest socket on port $effectivePort")
-                            } catch (e: BindException) {
-                                if (attempts >= 5) {
-                                    // If port 8554 is still held by OS, try fallback port 8556
-                                    try {
-                                        effectivePort = 8556
-                                        sock.bind(InetSocketAddress("0.0.0.0", effectivePort))
-                                        bound = true
-                                        Log.w(TAG, "Fell back to alternative port $effectivePort")
-                                    } catch (ex: Exception) {
-                                        throw e
-                                    }
-                                } else {
-                                    Log.w(TAG, "Port $effectivePort busy (attempt $attempts). Waiting 200ms...")
-                                    delay(200)
+                    while (!bound && attempts < 5) {
+                        attempts++
+                        try {
+                            sock.bind(InetSocketAddress("0.0.0.0", effectivePort))
+                            bound = true
+                            Log.d(TAG, "Successfully bound UDP ingest socket on port $effectivePort")
+                        } catch (e: BindException) {
+                            if (attempts >= 5) {
+                                try {
+                                    effectivePort = 8556
+                                    sock.bind(InetSocketAddress("0.0.0.0", effectivePort))
+                                    bound = true
+                                    Log.w(TAG, "Fell back to alternative port $effectivePort")
+                                } catch (ex: Exception) {
+                                    throw e
                                 }
+                            } else {
+                                Log.w(TAG, "Port $effectivePort busy (attempt $attempts). Waiting 200ms...")
+                                delay(200)
                             }
                         }
+                    }
 
-                        sock.soTimeout = 1000
-                        ingestSocket = sock
+                    sock.soTimeout = 1000
+                    ingestSocket = sock
 
-                        // 3. Create loopback forwarder targeting localhost
-                        val fwd = DatagramSocket()
-                        forwardSocket = fwd
-                        val loopbackDest = InetSocketAddress(InetAddress.getByName("127.0.0.1"), forwardPort)
+                    _stats.value = _stats.value.copy(
+                        isRunning = true,
+                        isBoundToNetwork = boundToNet,
+                        listenPort = effectivePort,
+                        statusText = "Listening on port $effectivePort (In-Memory LiveStreamDataPipe)..."
+                    )
 
-                        _stats.value = _stats.value.copy(
-                            isRunning = true,
-                            isBoundToNetwork = boundToNet,
-                            listenPort = effectivePort,
-                            statusText = "Listening on port $effectivePort (Relaying to 127.0.0.1:$forwardPort)..."
-                        )
+                    // 3. Start heartbeat loop directly through this bound socket
+                    startHeartbeat(sock, targetIp, effectivePort)
 
-                        // 4. Start heartbeat loop directly through this bound socket
-                        startHeartbeat(sock, targetIp, effectivePort)
+                    val buffer = ByteArray(BUFFER_SIZE)
+                    val packet = DatagramPacket(buffer, buffer.size)
 
-                        val buffer = ByteArray(BUFFER_SIZE)
-                        val packet = DatagramPacket(buffer, buffer.size)
+                    Log.d(TAG, "UDP Ingest loop running on port $effectivePort...")
 
-                        Log.d(TAG, "UDP Ingest loop running on port $effectivePort...")
-
+                    try {
                         while (isActive && !sock.isClosed) {
                             try {
                                 sock.receive(packet)
@@ -191,31 +188,38 @@ class BoundUdpStreamRelay(
                                         statusText = "Streaming: $totalPackets pkts (${(bitrate / 1000.0).let { "%.2f".format(it) }} Mbps)"
                                     )
 
-                                    // 1. In-memory handoff directly to Media3 ExoPlayer (immune to Android network routing issues)
+                                    // 1. Direct lock-free handoff into Media3 ExoPlayer
                                     dataPipe.write(buffer, length)
 
-                                    // 2. Loopback forwarder fallback
-                                    try {
-                                        val fwdPacket = DatagramPacket(buffer, 0, length, loopbackDest)
-                                        fwd.send(fwdPacket)
-                                    } catch (_: Exception) {}
-
-                                    // 3. Pass to circular retrospective clip buffer
+                                    // 2. Pass to circular retrospective clip buffer
                                     onPacketReceived?.invoke(buffer.copyOf(length), length)
                                 }
                             } catch (e: SocketTimeoutException) {
                                 // Expected timeout, loop to check isActive
+                            } catch (e: SocketException) {
+                                if (!isActive || sock.isClosed) {
+                                    // Normal intentional socket closure on stop/restart
+                                    break
+                                }
+                                Log.w(TAG, "SocketException during receive: ${e.message}")
                             }
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, "UDP relay error: ${e.message}", e)
-                        _stats.value = _stats.value.copy(
-                            isRunning = false,
-                            lastError = "${e.javaClass.simpleName}: ${e.message}",
-                            statusText = "Relay error: ${e.message}"
-                        )
+                        if (isActive && !sock.isClosed) {
+                            Log.e(TAG, "UDP ingest error: ${e.message}", e)
+                            _stats.value = _stats.value.copy(
+                                isRunning = false,
+                                lastError = "${e.javaClass.simpleName}: ${e.message}",
+                                statusText = "Relay error: ${e.message}"
+                            )
+                        }
                     } finally {
-                        cleanupSockets()
+                        try {
+                            sock.close()
+                        } catch (_: Exception) {}
+                        if (ingestSocket === sock) {
+                            ingestSocket = null
+                        }
                     }
                 }
             }
@@ -234,6 +238,7 @@ class BoundUdpStreamRelay(
                     sock.send(DatagramPacket(hero9Payload, hero9Payload.size, targetAddr))
                     sock.send(DatagramPacket(legacyPayload, legacyPayload.size, targetAddr))
                 } catch (e: Exception) {
+                    if (!isActive || sock.isClosed) break
                     Log.w(TAG, "Heartbeat ping note: ${e.message}")
                 }
                 delay(1500)
@@ -266,10 +271,10 @@ class BoundUdpStreamRelay(
         }
     }
 
-    private fun stopInternal() {
-        heartbeatJob?.cancel()
+    private suspend fun stopInternal() {
+        heartbeatJob?.cancelAndJoin()
         heartbeatJob = null
-        relayJob?.cancel()
+        relayJob?.cancelAndJoin()
         relayJob = null
         dataPipe.close()
         cleanupSockets()
