@@ -35,6 +35,8 @@ data class UiState(
     val batteryPercent: Int = 92,
     val isBleConnected: Boolean = false,
     val isWifiConnected: Boolean = false,
+    val wifiApSsid: String = "",
+    val wifiApPassword: String = "",
     val isStreaming: Boolean = false,
     val isRecording: Boolean = false,
     val isClipping: Boolean = false,
@@ -54,7 +56,7 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
 
     val bleManager = Hero9BleManager(context, bluetoothManager?.adapter, viewModelScope)
-    val wifiManager = GoProWifiManager(context)
+    val wifiManager = GoProWifiManager(context, viewModelScope)
     val httpClient = GoProHttpClient(viewModelScope)
     val playerManager = StreamPlayerManager(context)
     val clipBuffer = CircularClipBuffer(context, viewModelScope)
@@ -93,19 +95,28 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                         _uiState.value = _uiState.value.copy(
                             cameraName = bleState.deviceName,
                             isBleConnected = true,
-                            statusMessage = "Connected via BLE. Enabling Wi-Fi AP..."
+                            statusMessage = "Connected to ${bleState.deviceName}. Discovering services..."
+                        )
+                    }
+                    is BleConnectionState.Pairing -> {
+                        _uiState.value = _uiState.value.copy(
+                            cameraName = bleState.deviceName,
+                            isBleConnected = true,
+                            statusMessage = "Pairing with ${bleState.deviceName} & reading Wi-Fi AP..."
                         )
                     }
                     is BleConnectionState.WifiApInfo -> {
                         _uiState.value = _uiState.value.copy(
-                            statusMessage = "Connecting to Wi-Fi AP: ${bleState.ssid}..."
+                            wifiApSsid = bleState.ssid,
+                            wifiApPassword = bleState.password,
+                            statusMessage = "Wi-Fi AP: ${bleState.ssid} (Pass: ${bleState.password}). Connecting..."
                         )
-                        // Automatically connect to GoPro's Wi-Fi network
+                        // Request connection to GoPro's Wi-Fi network
                         wifiManager.connectToAccessPoint(bleState.ssid, bleState.password)
                     }
                     is BleConnectionState.Error -> {
                         _uiState.value = _uiState.value.copy(
-                            statusMessage = "BLE Error: ${bleState.message}"
+                            statusMessage = "BLE: ${bleState.message}"
                         )
                     }
                 }
@@ -120,12 +131,14 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                     is WifiConnectionState.Disconnected -> {
                         _uiState.value = _uiState.value.copy(
                             isWifiConnected = false,
-                            statusMessage = "Wi-Fi Disconnected"
+                            statusMessage = if (_uiState.value.wifiApSsid.isNotEmpty())
+                                "Wi-Fi Disconnected. Reconnecting to ${_uiState.value.wifiApSsid}..."
+                            else "Wi-Fi Disconnected"
                         )
                     }
                     is WifiConnectionState.Connecting -> {
                         _uiState.value = _uiState.value.copy(
-                            statusMessage = "Binding Wi-Fi socket to ${wifiState.ssid}..."
+                            statusMessage = "Connecting to GoPro Wi-Fi: ${wifiState.ssid}..."
                         )
                     }
                     is WifiConnectionState.Connected -> {
@@ -138,7 +151,7 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     is WifiConnectionState.Failed -> {
                         _uiState.value = _uiState.value.copy(
-                            statusMessage = "Wi-Fi Failed: ${wifiState.error}"
+                            statusMessage = "Wi-Fi Notice: ${wifiState.error}"
                         )
                     }
                 }
@@ -151,12 +164,25 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
             playerManager.playerState.collect { pState ->
                 when (pState) {
                     is PlayerState.Playing -> {
-                        _uiState.value = _uiState.value.copy(isStreaming = true)
+                        _uiState.value = _uiState.value.copy(
+                            isStreaming = true,
+                            statusMessage = "Live Stream active (720p60 UDP)"
+                        )
                     }
-                    is PlayerState.Idle, is PlayerState.Error -> {
+                    is PlayerState.Buffering -> {
+                        _uiState.value = _uiState.value.copy(
+                            statusMessage = "Buffering video stream..."
+                        )
+                    }
+                    is PlayerState.Idle -> {
                         _uiState.value = _uiState.value.copy(isStreaming = false)
                     }
-                    else -> {}
+                    is PlayerState.Error -> {
+                        _uiState.value = _uiState.value.copy(
+                            isStreaming = false,
+                            statusMessage = "Player Error: ${pState.message}"
+                        )
+                    }
                 }
             }
         }
@@ -166,16 +192,23 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
         bleManager.startScan()
     }
 
+    fun retryWifiConnect() {
+        val ssid = _uiState.value.wifiApSsid
+        val pass = _uiState.value.wifiApPassword
+        if (ssid.isNotEmpty() && pass.isNotEmpty()) {
+            wifiManager.connectToAccessPoint(ssid, pass)
+        }
+    }
+
     fun setClipDuration(seconds: Int) {
         _uiState.value = _uiState.value.copy(selectedClipDuration = seconds)
-        clipBuffer.setBufferDuration(seconds)
     }
 
     fun startLiveStream() {
         viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(statusMessage = "Starting camera live preview stream...")
             val started = httpClient.startStream()
             if (started) {
-                clipBuffer.startCapture()
                 playerManager.startPlaying()
                 _uiState.value = _uiState.value.copy(
                     isStreaming = true,
@@ -183,7 +216,7 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                 )
             } else {
                 _uiState.value = _uiState.value.copy(
-                    statusMessage = "Failed to start camera stream"
+                    statusMessage = "Could not reach camera stream at 10.5.5.9. Retrying..."
                 )
             }
         }
@@ -193,7 +226,6 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             httpClient.stopStream()
             playerManager.stop()
-            clipBuffer.stopCapture()
             _uiState.value = _uiState.value.copy(
                 isStreaming = false,
                 statusMessage = "Live Stream paused"
@@ -202,44 +234,28 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Retrospectively clips the last X seconds (15s, 30s, 60s):
-     * 1. Immediately dumps local ring-buffer for instant preview.
-     * 2. Triggers camera HindSight buffer flush to commit 4K master uncompressed clip.
-     * 3. Queries camera media list and downloads 4K master file in background.
+     * Retrospectively clips the last X seconds (15s, 30s, 60s) in full uncompressed resolution:
+     * 1. Triggers camera HindSight buffer flush to commit 4K master uncompressed clip.
+     * 2. Queries camera media list and downloads 4K master file via Turbo Transfer.
      */
     fun triggerRetrospectiveClip() {
         val duration = _uiState.value.selectedClipDuration
         _uiState.value = _uiState.value.copy(
             isClipping = true,
-            statusMessage = "Capturing retrospective ${duration}s clip..."
+            statusMessage = "Flushing HindSight 4K buffer for last ${duration}s..."
         )
 
         viewModelScope.launch(Dispatchers.IO) {
             val moviesDir = getClipsDirectory()
-            val timestamp = System.currentTimeMillis()
 
-            // 1. Instant preview clip dump from local buffer
-            val previewFile = File(moviesDir, "GoPro_Preview_${duration}s_$timestamp.ts")
-            val dumped = clipBuffer.dumpBufferToFile(previewFile)
-            if (dumped) {
-                val clip = SavedClip(
-                    title = "Instant Preview (${duration}s)",
-                    localPath = previewFile.absolutePath,
-                    isFullResMaster = false,
-                    fileSizeFormatted = "${previewFile.length() / (1024 * 1024)} MB",
-                    timestamp = timestamp
-                )
-                addClip(clip)
-            }
-
-            // 2. Camera HindSight full 4K/5K retrospective trigger
+            // 1. Camera HindSight full 4K/5K retrospective trigger
             val hindSightOk = httpClient.triggerHindSightClip(duration)
             if (hindSightOk) {
                 _uiState.value = _uiState.value.copy(
-                    statusMessage = "HindSight committed! Syncing 4K master file..."
+                    statusMessage = "HindSight committed to SD card! Syncing 4K master..."
                 )
 
-                // 3. Query latest recorded file from camera
+                // 2. Query latest recorded file from camera
                 val latestMedia = httpClient.getLatestMediaFile()
                 if (latestMedia != null) {
                     val masterFile = File(moviesDir, "GoPro_Master_${latestMedia.filename}")
@@ -252,7 +268,7 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
 
                     if (downloadOk) {
                         val masterClip = SavedClip(
-                            title = "4K60 Master (${latestMedia.filename})",
+                            title = "4K Master (${latestMedia.filename})",
                             localPath = masterFile.absolutePath,
                             isFullResMaster = true,
                             fileSizeFormatted = "${masterFile.length() / (1024 * 1024)} MB",
@@ -264,6 +280,10 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                 }
+            } else {
+                _uiState.value = _uiState.value.copy(
+                    statusMessage = "Failed to trigger HindSight clip on camera"
+                )
             }
 
             _uiState.value = _uiState.value.copy(
@@ -305,7 +325,6 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
         httpClient.stopKeepAlive()
         playerManager.release()
-        clipBuffer.stopCapture()
         bleManager.disconnect()
         wifiManager.disconnect()
     }

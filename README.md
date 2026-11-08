@@ -1,7 +1,7 @@
 # GoPro HERO9 Black — Android Streaming & Retrospective Clip App
 
 [![Build & Release Android APK](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/actions/workflows/build.yml/badge.svg)](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/actions/workflows/build.yml)
-[![GitHub Release](https://img.shields.io/github/v/release/Flexingg/GoPro-Hero-9-Black---Android?color=00E5FF)](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/tag/v0.0.1)
+[![GitHub Release](https://img.shields.io/github/v/release/Flexingg/GoPro-Hero-9-Black---Android?color=00E5FF)](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/tag/v0.0.2)
 
 An Android application engineered to pair with the **GoPro HERO9 Black** over BLE & 5GHz Wi-Fi, stream live preview footage with ultra-low latency, and retrospectively clip and save the last $X$ seconds (15s, 30s, 60s) in full uncompressed resolution (4K 60fps / 5K 30fps).
 
@@ -9,12 +9,12 @@ Styled using **Oppo's Android 17 (ColorOS 17) "Living Flow Design" (流体设计
 
 ---
 
-## 🚀 Download v0.0.1 Release
+## 🚀 Download v0.0.2 Release
 
-Download the pre-built APKs directly from the [GitHub v0.0.1 Release](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/tag/v0.0.1):
+Download the pre-built APKs directly from the [GitHub v0.0.2 Release](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/tag/v0.0.2):
 
-- 📦 [**Download `app-debug.apk`**](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/download/v0.0.1/app-debug.apk) (Ready for direct sideloading and testing)
-- 📦 [**Download `app-release.apk`**](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/download/v0.0.1/app-release.apk) (Optimized release build)
+- 📦 [**Download `app-debug.apk`**](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/download/v0.0.2/app-debug.apk) (Ready for direct sideloading and testing)
+- 📦 [**Download `app-release.apk`**](https://github.com/Flexingg/GoPro-Hero-9-Black---Android/releases/download/v0.0.2/app-release.apk) (Optimized release build)
 
 ---
 

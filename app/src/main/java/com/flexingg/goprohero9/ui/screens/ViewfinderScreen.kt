@@ -1,5 +1,7 @@
 package com.flexingg.goprohero9.ui.screens
 
+import android.content.Intent
+import android.provider.Settings
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.annotation.OptIn
@@ -28,12 +30,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BluetoothSearching
+import androidx.compose.material.icons.automirrored.filled.BluetoothSearching
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -51,6 +56,8 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -72,6 +79,7 @@ fun ViewfinderScreen(
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
     var isGalleryOpen by remember { mutableStateOf(false) }
 
     Box(
@@ -118,8 +126,8 @@ fun ViewfinderScreen(
             )
         }
 
-        // Connect prompt if not connected
-        if (!uiState.isBleConnected) {
+        // 3. Connect prompt if not connected
+        if (!uiState.isBleConnected && !uiState.isWifiConnected) {
             LuminousGlassCard(
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -130,13 +138,13 @@ fun ViewfinderScreen(
                 Column(
                     modifier = Modifier.padding(24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.BluetoothSearching,
+                        imageVector = Icons.AutoMirrored.Filled.BluetoothSearching,
                         contentDescription = "Search",
                         tint = LivingFlowTokens.LivingCyan,
-                        modifier = Modifier.size(48.dp)
+                        modifier = Modifier.size(44.dp)
                     )
                     Text(
                         text = "Connect GoPro HERO9 Black",
@@ -145,9 +153,9 @@ fun ViewfinderScreen(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Ensure camera Bluetooth is ON.\nApp will auto-configure 5GHz Wi-Fi AP for live streaming.",
+                        text = "Turn camera ON with Wireless Connections enabled.\nApp will pair via BLE and start 5GHz Wi-Fi streaming.",
                         color = Color(0xBBFFFFFF),
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
 
@@ -155,16 +163,111 @@ fun ViewfinderScreen(
                         text = "Scan & Pair Camera",
                         onClick = { viewModel.startDiscovery() }
                     )
+
+                    // Fallback direct stream button if user is already on GoPro Wi-Fi
+                    Text(
+                        text = "Already on GoPro Wi-Fi? Start Stream",
+                        color = LivingFlowTokens.LivingCyan,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .clickable { viewModel.startLiveStream() }
+                            .padding(top = 4.dp)
+                    )
                 }
             }
         }
 
-        // 3. Status Notification Pill
+        // 4. Wi-Fi AP Provisioned Card (Displays credentials and direct Wi-Fi options)
+        if (uiState.isBleConnected && !uiState.isWifiConnected && uiState.wifiApSsid.isNotEmpty()) {
+            LuminousGlassCard(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(28.dp),
+                shape = RoundedCornerShape(LivingFlowTokens.RadiusMedium),
+                thickness = GlassThickness.THICK
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Wifi,
+                        contentDescription = "Wi-Fi",
+                        tint = LivingFlowTokens.LivingEmerald,
+                        modifier = Modifier.size(40.dp)
+                    )
+                    Text(
+                        text = "Camera Wi-Fi AP Ready",
+                        color = Color.White,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0x33000000))
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "SSID: ${uiState.wifiApSsid}",
+                            color = LivingFlowTokens.LivingCyan,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Text(
+                            text = "Password: ${uiState.wifiApPassword}",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+
+                    Text(
+                        text = "Connecting via system Wi-Fi specifier...\nIf the prompt doesn't appear, you can join directly in Settings.",
+                        color = Color(0xBBFFFFFF),
+                        fontSize = 11.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            LuminousSmallButton(
+                                text = "Wi-Fi Settings",
+                                icon = Icons.Default.Settings,
+                                onClick = {
+                                    context.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
+                                }
+                            )
+                        }
+                        Box(modifier = Modifier.weight(1f)) {
+                            LuminousSmallButton(
+                                text = "Start Stream",
+                                icon = Icons.Default.Videocam,
+                                isAccent = true,
+                                onClick = { viewModel.startLiveStream() }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. Status Notification Pill
         if (uiState.statusMessage.isNotEmpty()) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 115.dp)
+                    .padding(top = 115.dp, start = 20.dp, end = 20.dp)
             ) {
                 LuminousGlassCard(
                     shape = RoundedCornerShape(LivingFlowTokens.RadiusPill),
@@ -181,7 +284,7 @@ fun ViewfinderScreen(
             }
         }
 
-        // 4. Download / Sync Progress Bar
+        // 6. Download / Sync Progress Bar
         if (uiState.isClipping || uiState.clipDownloadProgress > 0f) {
             Column(
                 modifier = Modifier
@@ -192,7 +295,7 @@ fun ViewfinderScreen(
                 Text(
                     text = if (uiState.clipDownloadProgress > 0f)
                         "Syncing 4K Master Clip: ${(uiState.clipDownloadProgress * 100).toInt()}%"
-                    else "Committing HindSight buffer to camera...",
+                    else "Flushing HindSight buffer to camera...",
                     color = LivingFlowTokens.LivingCyan,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -210,7 +313,7 @@ fun ViewfinderScreen(
             }
         }
 
-        // 5. Bottom Living Flow Control Deck
+        // 7. Bottom Living Flow Control Deck
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -256,7 +359,7 @@ fun ViewfinderScreen(
             }
         }
 
-        // 6. Media Gallery Bottom Sheet
+        // 8. Media Gallery Bottom Sheet
         AnimatedVisibility(
             visible = isGalleryOpen,
             enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
@@ -441,5 +544,61 @@ private fun LuminousActionButton(
             fontSize = 14.sp,
             fontWeight = FontWeight.Bold
         )
+    }
+}
+
+@Composable
+private fun LuminousSmallButton(
+    text: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    isAccent: Boolean = false,
+    onClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.94f else 1.0f,
+        animationSpec = if (isPressed) LivingFlowTokens.SpringPress else LivingFlowTokens.SpringRebound,
+        label = "SmallBtnScale"
+    )
+
+    Box(
+        modifier = Modifier
+            .scale(scale)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(LivingFlowTokens.RadiusPill))
+            .background(if (isAccent) LivingFlowTokens.LivingCyan else Color(0x33FFFFFF))
+            .border(
+                1.dp,
+                if (isAccent) LivingFlowTokens.LuminousContourLight else LivingFlowTokens.LuminousContourDark,
+                RoundedCornerShape(LivingFlowTokens.RadiusPill)
+            )
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = if (isAccent) Color.Black else Color.White,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = text,
+                color = if (isAccent) Color.Black else Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
     }
 }
