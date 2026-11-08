@@ -58,6 +58,7 @@ fun FluidCloudCapsule(
     isBleConnected: Boolean,
     selectedClipDuration: Int,
     streamFps: Int,
+    streamResolution: String = "",
     modifier: Modifier = Modifier
 ) {
     var isExpanded by remember { mutableStateOf(false) }
@@ -114,7 +115,7 @@ fun FluidCloudCapsule(
                     Text(
                         text = when {
                             isRecording -> "REC • BUFFERING FULL-RES"
-                            isStreaming -> "LIVE UDP • 720p$streamFps"
+                            isStreaming -> if (streamResolution.isNotEmpty()) "LIVE • $streamResolution ${streamFps}fps" else "LIVE UDP • 720p$streamFps"
                             isWifiConnected -> "WI-FI READY • 5GHz"
                             isBleConnected -> "BLE PAIRED"
                             else -> "SEARCHING HERO9..."

@@ -43,6 +43,8 @@ data class UiState(
     val clipDownloadProgress: Float = 0f,
     val selectedClipDuration: Int = 30, // seconds
     val streamFps: Int = 60,
+    val streamResolution: String = "",
+    val isFirstFrameRendered: Boolean = false,
     val statusMessage: String = "Ready to connect",
     val savedClips: List<SavedClip> = emptyList()
 )
@@ -167,9 +169,11 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
             playerManager.playerState.collect { pState ->
                 when (pState) {
                     is PlayerState.Playing -> {
+                        val res = playerManager.videoResolution.value
+                        val msg = if (res.isNotEmpty()) "Live Stream active ($res 60fps)" else "Live Stream active (720p60 UDP)"
                         _uiState.value = _uiState.value.copy(
                             isStreaming = true,
-                            statusMessage = "Live Stream active (720p60 UDP)"
+                            statusMessage = msg
                         )
                     }
                     is PlayerState.Buffering -> {
@@ -178,14 +182,41 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                     is PlayerState.Idle -> {
-                        _uiState.value = _uiState.value.copy(isStreaming = false)
+                        _uiState.value = _uiState.value.copy(
+                            isStreaming = false,
+                            isFirstFrameRendered = false
+                        )
                     }
                     is PlayerState.Error -> {
                         _uiState.value = _uiState.value.copy(
                             isStreaming = false,
+                            isFirstFrameRendered = false,
                             statusMessage = "Player Error: ${pState.message}"
                         )
                     }
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            playerManager.isFirstFrameRendered.collect { rendered ->
+                _uiState.value = _uiState.value.copy(isFirstFrameRendered = rendered)
+                if (rendered) {
+                    val res = _uiState.value.streamResolution
+                    _uiState.value = _uiState.value.copy(
+                        statusMessage = if (res.isNotEmpty()) "Viewfinder active ($res 60fps)" else "Viewfinder active"
+                    )
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            playerManager.videoResolution.collect { res ->
+                if (res.isNotEmpty()) {
+                    _uiState.value = _uiState.value.copy(
+                        streamResolution = res,
+                        statusMessage = "Viewfinder active ($res 60fps)"
+                    )
                 }
             }
         }

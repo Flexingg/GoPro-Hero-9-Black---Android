@@ -12,6 +12,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -63,8 +66,9 @@ class GoProHttpClient(
     fun startKeepAlive() {
         stopKeepAlive()
         keepAliveJob = scope.launch(Dispatchers.IO) {
-            Log.d(TAG, "Starting keep-alive heartbeat loop...")
+            Log.d(TAG, "Starting keep-alive heartbeat loop (HTTP + UDP)...")
             while (isActive) {
+                // 1. HTTP Keep-Alive
                 try {
                     val request = Request.Builder()
                         .url("$baseUrl/gopro/camera/keep_alive")
@@ -76,8 +80,21 @@ class GoProHttpClient(
                         }
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Keep-alive ping error: ${e.message}")
+                    Log.w(TAG, "Keep-alive HTTP ping error: ${e.message}")
                 }
+
+                // 2. UDP Heartbeat ping to camera to register client port and keep UDP stream flowing
+                try {
+                    val targetAddr = InetAddress.getByName(baseIp)
+                    val pingData = "_GPHD_:0:0:2:0.000000\n".toByteArray(Charsets.UTF_8)
+                    DatagramSocket().use { udpSocket ->
+                        val packet = DatagramPacket(pingData, pingData.size, targetAddr, 8554)
+                        udpSocket.send(packet)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Keep-alive UDP ping note: ${e.message}")
+                }
+
                 delay(2500)
             }
         }

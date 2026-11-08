@@ -2,9 +2,11 @@ package com.flexingg.goprohero9.ui.screens
 
 import android.content.Intent
 import android.provider.Settings
+import android.view.LayoutInflater
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.annotation.OptIn
+import com.flexingg.goprohero9.R
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
@@ -87,16 +89,20 @@ fun ViewfinderScreen(
             .fillMaxSize()
             .background(Color(0xFF040608))
     ) {
-        // 1. Live Video Viewfinder Surface (Media3 ExoPlayer PlayerView)
+        // 1. Live Video Viewfinder Surface (Media3 ExoPlayer PlayerView with TextureView)
         AndroidView(
             factory = { ctx ->
-                PlayerView(ctx).apply {
+                (LayoutInflater.from(ctx).inflate(R.layout.viewfinder_player_view, null, false) as PlayerView).apply {
                     layoutParams = FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
-                    useController = false
                     player = viewModel.playerManager.initializePlayer()
+                }
+            },
+            update = { view ->
+                if (view.player == null) {
+                    view.player = viewModel.playerManager.initializePlayer()
                 }
             },
             modifier = Modifier.fillMaxSize()
@@ -122,7 +128,8 @@ fun ViewfinderScreen(
                 isWifiConnected = uiState.isWifiConnected,
                 isBleConnected = uiState.isBleConnected,
                 selectedClipDuration = uiState.selectedClipDuration,
-                streamFps = uiState.streamFps
+                streamFps = uiState.streamFps,
+                streamResolution = uiState.streamResolution
             )
         }
 
