@@ -48,7 +48,9 @@ data class DiagnosticsState(
     val isDirectUdpMode: Boolean = false,
     val isOnHomeWifi: Boolean = false,
     val pipeBytesWritten: Long = 0L,
-    val pipeBytesRead: Long = 0L
+    val pipeBytesRead: Long = 0L,
+    val playerPlaybackState: String = "IDLE",
+    val detectedTracks: String = "None"
 )
 
 data class UiState(
@@ -333,6 +335,22 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
             playerManager.lastPlayerError.collect { err ->
                 _uiState.value = _uiState.value.copy(
                     diagnostics = _uiState.value.diagnostics.copy(lastPlayerError = err)
+                )
+            }
+        }
+
+        viewModelScope.launch {
+            playerManager.playbackStateLabel.collect { label ->
+                _uiState.value = _uiState.value.copy(
+                    diagnostics = _uiState.value.diagnostics.copy(playerPlaybackState = label)
+                )
+            }
+        }
+
+        viewModelScope.launch {
+            playerManager.detectedTracksInfo.collect { tracks ->
+                _uiState.value = _uiState.value.copy(
+                    diagnostics = _uiState.value.diagnostics.copy(detectedTracks = tracks)
                 )
             }
         }

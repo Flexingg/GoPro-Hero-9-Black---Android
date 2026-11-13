@@ -3,12 +3,14 @@ package com.flexingg.goprohero9.player
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import android.util.SparseArray
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.TimestampAdjuster
 import androidx.media3.common.util.UnstableApi
@@ -20,6 +22,7 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import androidx.media3.extractor.ts.TsExtractor
+import androidx.media3.extractor.ts.TsPayloadReader
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -52,6 +55,12 @@ class StreamPlayerManager(private val context: Context) {
     private val _lastPlayerError = MutableStateFlow("")
     val lastPlayerError: StateFlow<String> = _lastPlayerError.asStateFlow()
 
+    private val _playbackStateLabel = MutableStateFlow("IDLE")
+    val playbackStateLabel: StateFlow<String> = _playbackStateLabel.asStateFlow()
+
+    private val _detectedTracksInfo = MutableStateFlow("None")
+    val detectedTracksInfo: StateFlow<String> = _detectedTracksInfo.asStateFlow()
+
     fun initializePlayer(): ExoPlayer {
         if (exoPlayer != null) return exoPlayer!!
 
@@ -81,11 +90,34 @@ class StreamPlayerManager(private val context: Context) {
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 when (playbackState) {
-                    Player.STATE_IDLE -> _playerState.value = PlayerState.Idle
-                    Player.STATE_BUFFERING -> _playerState.value = PlayerState.Buffering
-                    Player.STATE_READY -> _playerState.value = PlayerState.Playing
-                    Player.STATE_ENDED -> _playerState.value = PlayerState.Idle
+                    Player.STATE_IDLE -> {
+                        _playbackStateLabel.value = "IDLE"
+                        _playerState.value = PlayerState.Idle
+                    }
+                    Player.STATE_BUFFERING -> {
+                        _playbackStateLabel.value = "BUFFERING"
+                        _playerState.value = PlayerState.Buffering
+                    }
+                    Player.STATE_READY -> {
+                        _playbackStateLabel.value = "READY"
+                        _playerState.value = PlayerState.Playing
+                    }
+                    Player.STATE_ENDED -> {
+                        _playbackStateLabel.value = "ENDED"
+                        _playerState.value = PlayerState.Idle
+                    }
                 }
+            }
+
+            override fun onTracksChanged(tracks: Tracks) {
+                val summary = tracks.groups.mapIndexed { idx, group ->
+                    val fmt = if (group.length > 0) group.getTrackFormat(0) else null
+                    val mime = fmt?.sampleMimeType ?: "unknown"
+                    val dims = if (fmt != null && fmt.width > 0) " ${fmt.width}x${fmt.height}" else ""
+                    "#${idx}:$mime$dims(sel=${group.isSelected})"
+                }.joinToString(", ").ifEmpty { "None" }
+                Log.d(TAG, "ExoPlayer tracks changed: $summary")
+                _detectedTracksInfo.value = summary
             }
 
             override fun onRenderedFirstFrame() {
@@ -105,6 +137,7 @@ class StreamPlayerManager(private val context: Context) {
             override fun onPlayerError(error: PlaybackException) {
                 val err = error.message ?: "Playback error (${error.errorCode})"
                 Log.e(TAG, "ExoPlayer playback error: $err", error)
+                _playbackStateLabel.value = "ERROR(${error.errorCodeName})"
                 _lastPlayerError.value = err
                 _playerState.value = PlayerState.Error(err)
             }
@@ -121,11 +154,46 @@ class StreamPlayerManager(private val context: Context) {
             DefaultTsPayloadReaderFactory.FLAG_IGNORE_SPLICE_INFO_STREAM
 
         return ExtractorsFactory {
+            val defaultFactory = DefaultTsPayloadReaderFactory(tsPayloadFlags)
+            var videoReaderCreated = false
+            val goproPayloadFactory = object : TsPayloadReader.Factory {
+                override fun createInitialPayloadReaders(): SparseArray<TsPayloadReader> {
+                    return SparseArray()
+                }
+
+                override fun createPayloadReader(
+                    streamType: Int,
+                    esInfo: TsPayloadReader.EsInfo
+                ): TsPayloadReader? {
+                    // GoPro HERO9 PMT declares 4 streams (0x1011 H.264 active, 0x1100 H.264 empty,
+                    // 0x200 AAC 0ch empty, 0x201 AC-3 0ch empty). ProgressiveMediaPeriod.maybeFinishPrepare()
+                    // blocks forever if ANY registered SampleQueue never receives a Format.
+                    // Register ONLY the primary H.264/H.265 video stream so prepare() completes immediately.
+                    return when (streamType) {
+                        TsExtractor.TS_STREAM_TYPE_H264,
+                        TsExtractor.TS_STREAM_TYPE_H265 -> {
+                            if (!videoReaderCreated) {
+                                videoReaderCreated = true
+                                Log.d(TAG, "Registering primary video reader for streamType=0x${streamType.toString(16)}")
+                                defaultFactory.createPayloadReader(streamType, esInfo)
+                            } else {
+                                Log.d(TAG, "Skipping secondary empty video streamType=0x${streamType.toString(16)}")
+                                null
+                            }
+                        }
+                        else -> {
+                            Log.d(TAG, "Skipping non-video TS streamType=0x${streamType.toString(16)}")
+                            null
+                        }
+                    }
+                }
+            }
+
             arrayOf(
                 TsExtractor(
                     TsExtractor.MODE_SINGLE_PMT,
                     TimestampAdjuster(0),
-                    DefaultTsPayloadReaderFactory(tsPayloadFlags)
+                    goproPayloadFactory
                 )
             )
         }

@@ -244,14 +244,27 @@ fun DiagnosticsSheet(
             // 3. Media3 ExoPlayer Section
             SectionHeader(title = "Media3 Video Player")
             DiagnosticRow(
+                label = "Player State",
+                value = diag.playerPlaybackState,
+                valueColor = when {
+                    diag.playerPlaybackState == "READY" -> LivingFlowTokens.LivingEmerald
+                    diag.playerPlaybackState.startsWith("ERROR") -> LivingFlowTokens.LivingCrimson
+                    else -> Color(0xFFFFB300)
+                }
+            )
+            DiagnosticRow(
                 label = "First Frame Rendered",
-                value = if (uiState.isFirstFrameRendered) "YES (Video Active)" else "NO (Buffering)",
+                value = if (uiState.isFirstFrameRendered) "YES (Video Active)" else "NO (${diag.playerPlaybackState})",
                 valueColor = if (uiState.isFirstFrameRendered) LivingFlowTokens.LivingEmerald else Color(0xFFFFB300)
             )
             DiagnosticRow(
                 label = "Player Buffer Read",
                 value = "${diag.pipeBytesRead / 1024} KB read (Pipe Ingested: ${diag.pipeBytesWritten / 1024} KB)",
                 valueColor = if (diag.pipeBytesRead > 0) LivingFlowTokens.LivingCyan else Color(0xFFFFB300)
+            )
+            DiagnosticRow(
+                label = "Detected Tracks",
+                value = diag.detectedTracks
             )
             DiagnosticRow(
                 label = "Detected Resolution",
@@ -328,6 +341,8 @@ fun DiagnosticsSheet(
                             appendLine("Pipe Read: ${diag.pipeBytesRead} bytes (${diag.pipeBytesRead / 1024} KB)")
                             appendLine("Relay Status: ${diag.relayStatus}")
                             appendLine("HTTP Log: ${diag.lastHttpLog}")
+                            appendLine("Player State: ${diag.playerPlaybackState}")
+                            appendLine("Detected Tracks: ${diag.detectedTracks}")
                             appendLine("First Frame Rendered: ${uiState.isFirstFrameRendered}")
                             appendLine("Stream Resolution: ${uiState.streamResolution}")
                             appendLine("Player Error: ${diag.lastPlayerError}")
