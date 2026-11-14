@@ -117,6 +117,8 @@ fun ClipPlayerDialog(
     var frameDetections by remember { mutableStateOf<List<CardDetection>>(emptyList()) }
     var frameScanTrigger by remember { mutableIntStateOf(0) }
 
+    var playerErrorMsg by remember { mutableStateOf<String?>(null) }
+
     val clipPlayer = remember(clip.localPath) {
         ExoPlayer.Builder(context).build().apply {
             setSeekParameters(SeekParameters.EXACT)
@@ -128,14 +130,19 @@ fun ClipPlayerDialog(
                         videoHeight = videoSize.height
                     }
                 }
+
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    playerErrorMsg = error.errorCodeName
+                }
             })
         }
     }
 
     LaunchedEffect(clip.localPath) {
+        playerErrorMsg = null
         val src = File(clip.localPath)
         val targetFile = if (src.extension.equals("ts", ignoreCase = true)) {
-            val cachedMp4 = File(context.cacheDir, "${src.nameWithoutExtension}_seekable_v2.mp4")
+            val cachedMp4 = File(context.cacheDir, "${src.nameWithoutExtension}_seekable_v3.mp4")
             if (!cachedMp4.exists() || cachedMp4.length() == 0L) {
                 withContext(Dispatchers.IO) {
                     com.flexingg.goprohero9.buffer.TsToMp4Remuxer.remux(src, cachedMp4)
@@ -211,7 +218,18 @@ fun ClipPlayerDialog(
             }
         } else {
             clipPlayer.setPlaybackSpeed(selectedSpeed.speedMultiplier)
-            clipPlayer.playWhenReady = isVarPlaying
+            if (isVarPlaying) {
+                if (clipPlayer.playbackState == Player.STATE_IDLE) {
+                    clipPlayer.prepare()
+                } else if (clipPlayer.playbackState == Player.STATE_ENDED) {
+                    clipPlayer.seekTo(0L)
+                }
+                clipPlayer.playWhenReady = true
+                clipPlayer.play()
+            } else {
+                clipPlayer.playWhenReady = false
+                clipPlayer.pause()
+            }
         }
     }
 
@@ -401,8 +419,12 @@ fun ClipPlayerDialog(
                             .padding(horizontal = 10.dp, vertical = 4.dp)
                     ) {
                         Text(
-                            text = "${selectedSpeed.label}  •  ${formatTimecodeMs(if (isScrubbing) scrubPosMs else currentPosMs)}",
-                            color = LivingFlowTokens.LivingCyan,
+                            text = if (playerErrorMsg != null) {
+                                "${selectedSpeed.label} • ERR: $playerErrorMsg"
+                            } else {
+                                "${selectedSpeed.label}  •  ${formatTimecodeMs(if (isScrubbing) scrubPosMs else currentPosMs)}"
+                            },
+                            color = if (playerErrorMsg != null) Color(0xFFFF6B86) else LivingFlowTokens.LivingCyan,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace

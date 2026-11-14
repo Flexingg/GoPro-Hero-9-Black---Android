@@ -49,8 +49,7 @@ object TsToMp4Remuxer {
 
         val sampleBuffer = ByteArrayOutputStream(65536)
 
-        val tsPayloadFlags = DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
-            DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS or
+        val tsPayloadFlags = DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS or
             DefaultTsPayloadReaderFactory.FLAG_IGNORE_AAC_STREAM or
             DefaultTsPayloadReaderFactory.FLAG_IGNORE_SPLICE_INFO_STREAM
 
@@ -138,14 +137,15 @@ object TsToMp4Remuxer {
 
                 if (!muxerStarted || videoTrackIndex < 0 || sampleEnd <= sampleStart) return
 
-                val isKeyframe = (flags and C.BUFFER_FLAG_KEY_FRAME) != 0
-                if (!seenKeyframe) {
-                    if (!isKeyframe) return
-                    seenKeyframe = true
-                }
-
                 val avccBytes = annexBToAvcc(allBytes, sampleStart, sampleEnd)
                 if (avccBytes.isEmpty()) return
+
+                val isIdr = containsIdrNal(avccBytes)
+                val isKeyframe = isIdr || ((flags and C.BUFFER_FLAG_KEY_FRAME) != 0)
+                if (!seenKeyframe) {
+                    if (!isIdr) return
+                    seenKeyframe = true
+                }
 
                 val validTimeUs = if (timeUs != C.TIME_UNSET && timeUs >= 0L) {
                     timeUs
@@ -215,7 +215,10 @@ object TsToMp4Remuxer {
             muxer?.release()
             muxer = null
 
-            val ok = framesWritten > 0 && mp4File.exists() && mp4File.length() > 0L
+            var ok = framesWritten > 0 && mp4File.exists() && mp4File.length() > 0L
+            if (ok) {
+                ok = verifyMp4Decodable(mp4File)
+            }
             Log.d(TAG, "Remux complete: ok=$ok frames=$framesWritten size=${mp4File.length()}")
             if (!ok && mp4File.exists()) mp4File.delete()
             ok
@@ -228,6 +231,41 @@ object TsToMp4Remuxer {
             if (mp4File.exists()) mp4File.delete()
             false
         }
+    }
+
+    private fun verifyMp4Decodable(mp4File: File): Boolean {
+        val retriever = android.media.MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(mp4File.absolutePath)
+            val bmp = retriever.getFrameAtTime(0L, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                ?: retriever.getFrameAtTime(-1L)
+            val valid = bmp != null && bmp.width > 0 && bmp.height > 0
+            bmp?.recycle()
+            Log.d(TAG, "MediaMetadataRetriever verifyMp4Decodable=$valid")
+            valid
+        } catch (e: Exception) {
+            Log.e(TAG, "MediaMetadataRetriever verification failed: ${e.message}")
+            false
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun containsIdrNal(avccBytes: ByteArray): Boolean {
+        var i = 0
+        while (i + 4 < avccBytes.size) {
+            val len = ((avccBytes[i].toInt() and 0xFF) shl 24) or
+                ((avccBytes[i + 1].toInt() and 0xFF) shl 16) or
+                ((avccBytes[i + 2].toInt() and 0xFF) shl 8) or
+                (avccBytes[i + 3].toInt() and 0xFF)
+            if (len <= 0 || i + 4 + len > avccBytes.size) break
+            val nalType = avccBytes[i + 4].toInt() and 0x1F
+            if (nalType == 5) return true
+            i += 4 + len
+        }
+        return false
     }
 
     /**
@@ -272,9 +310,9 @@ object TsToMp4Remuxer {
     private fun writeAvccNal(out: ByteArrayOutputStream, data: ByteArray, nalStart: Int, nalEnd: Int) {
         val len = nalEnd - nalStart
         if (len <= 0) return
-        // Skip H.264 Access Unit Delimiter (AUD, type 9) if present
+        // Skip H.264 SPS (7), PPS (8), and AUD (9) inside mdat samples (SPS/PPS belong in avcC)
         val nalType = data[nalStart].toInt() and 0x1F
-        if (nalType == 9 && len <= 2) return
+        if (nalType == 7 || nalType == 8 || nalType == 9) return
 
         out.write((len ushr 24) and 0xFF)
         out.write((len ushr 16) and 0xFF)

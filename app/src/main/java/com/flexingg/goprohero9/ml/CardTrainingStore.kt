@@ -22,7 +22,8 @@ data class TrainedCardSample(
     val rankTemplate: FloatArray,   // 16x16 = 256
     val suitTemplate: FloatArray,   // 16x16 = 256
     val rednessScore: Float,
-    val createdAt: Long
+    val createdAt: Long,
+    val thumbPath: String? = null
 ) {
     val label: String get() = "${rank.symbol}${suit.symbol}"
 }
@@ -42,6 +43,7 @@ data class ExtractedCornerFeatures(
 object CardTrainingStore {
     private const val TAG = "CardTrainingStore"
     private const val FILE_NAME = "card_training_v1.json"
+    private const val THUMBS_DIR = "card_thumbs"
     const val CORNER_SIZE = 24
     const val PART_SIZE = 16
 
@@ -68,16 +70,19 @@ object CardTrainingStore {
         suit: CardSuit
     ): TrainedCardSample {
         init(context)
+        val id = UUID.randomUUID().toString()
+        val thumbPath = saveThumbnail(id, cornerBitmap)
         val features = extractFeatures(cornerBitmap)
         val sample = TrainedCardSample(
-            id = UUID.randomUUID().toString(),
+            id = id,
             rank = rank,
             suit = suit,
             cornerTemplate = features.cornerTemplate,
             rankTemplate = features.rankTemplate,
             suitTemplate = features.suitTemplate,
             rednessScore = features.rednessScore,
-            createdAt = System.currentTimeMillis()
+            createdAt = System.currentTimeMillis(),
+            thumbPath = thumbPath
         )
         val updated = samples + sample
         samples = updated
@@ -86,8 +91,21 @@ object CardTrainingStore {
         return sample
     }
 
+    fun updateSample(context: Context, id: String, newRank: CardRank, newSuit: CardSuit) {
+        init(context)
+        val updated = samples.map { s ->
+            if (s.id == id) s.copy(rank = newRank, suit = newSuit) else s
+        }
+        samples = updated
+        _samplesFlow.value = updated
+        saveToDisk(updated)
+    }
+
     fun removeSample(context: Context, id: String) {
         init(context)
+        samples.firstOrNull { it.id == id }?.thumbPath?.let { path ->
+            runCatching { File(path).delete() }
+        }
         val updated = samples.filterNot { it.id == id }
         samples = updated
         _samplesFlow.value = updated
@@ -96,9 +114,29 @@ object CardTrainingStore {
 
     fun clearAll(context: Context) {
         init(context)
+        appFilesDir?.let { dir ->
+            File(dir, THUMBS_DIR).deleteRecursively()
+        }
         samples = emptyList()
         _samplesFlow.value = emptyList()
         saveToDisk(emptyList())
+    }
+
+    private fun saveThumbnail(id: String, bitmap: Bitmap): String? {
+        val dir = appFilesDir ?: return null
+        return try {
+            val thumbsDir = File(dir, THUMBS_DIR).apply { mkdirs() }
+            val file = File(thumbsDir, "$id.png")
+            val scaled = Bitmap.createScaledBitmap(bitmap, 72, 104, true)
+            java.io.FileOutputStream(file).use { out ->
+                scaled.compress(Bitmap.CompressFormat.PNG, 92, out)
+            }
+            if (scaled != bitmap) scaled.recycle()
+            file.absolutePath
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to save thumbnail: ${e.message}")
+            null
+        }
     }
 
     fun extractFeatures(cornerBitmap: Bitmap): ExtractedCornerFeatures {
@@ -291,7 +329,8 @@ object CardTrainingStore {
                         rankTemplate = jsonToFloatArray(obj.getJSONArray("rankTpl")),
                         suitTemplate = jsonToFloatArray(obj.getJSONArray("suitTpl")),
                         rednessScore = obj.optDouble("redness", 0.0).toFloat(),
-                        createdAt = obj.optLong("createdAt", 0L)
+                        createdAt = obj.optLong("createdAt", 0L),
+                        thumbPath = obj.optString("thumbPath", "").ifBlank { null }
                     )
                 )
             }
@@ -318,6 +357,7 @@ object CardTrainingStore {
                     put("suitTpl", floatArrayToJson(s.suitTemplate))
                     put("redness", s.rednessScore.toDouble())
                     put("createdAt", s.createdAt)
+                    if (s.thumbPath != null) put("thumbPath", s.thumbPath)
                 }
                 arr.put(obj)
             }
