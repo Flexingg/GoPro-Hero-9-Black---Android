@@ -2,6 +2,8 @@ package com.flexingg.goprohero9.player
 
 import android.content.Context
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.util.SparseArray
 import androidx.annotation.OptIn
@@ -61,18 +63,50 @@ class StreamPlayerManager(private val context: Context) {
     private val _detectedTracksInfo = MutableStateFlow("None")
     val detectedTracksInfo: StateFlow<String> = _detectedTracksInfo.asStateFlow()
 
+    private var activeDataPipe: com.flexingg.goprohero9.data.stream.LiveStreamDataPipe? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val catchUpRunnable = object : Runnable {
+        override fun run() {
+            val player = exoPlayer
+            val pipe = activeDataPipe
+            if (player != null && pipe != null && player.playbackState == Player.STATE_READY) {
+                val qSize = pipe.queueSize()
+                val bufferedMs = player.totalBufferedDuration.coerceAtLeast(0L)
+                val targetSpeed = when {
+                    qSize > 16 || bufferedMs > 180L -> 1.06f
+                    qSize > 8 || bufferedMs > 110L -> 1.03f
+                    else -> 1.0f
+                }
+                if (player.playbackParameters.speed != targetSpeed) {
+                    player.setPlaybackSpeed(targetSpeed)
+                }
+                mainHandler.postDelayed(this, 250L)
+            }
+        }
+    }
+
+    private fun startCatchUpLoop() {
+        mainHandler.removeCallbacks(catchUpRunnable)
+        mainHandler.postDelayed(catchUpRunnable, 250L)
+    }
+
+    private fun stopCatchUpLoop() {
+        mainHandler.removeCallbacks(catchUpRunnable)
+        exoPlayer?.setPlaybackSpeed(1.0f)
+    }
+
     fun initializePlayer(): ExoPlayer {
         if (exoPlayer != null) return exoPlayer!!
 
-        Log.d(TAG, "Initializing Media3 ExoPlayer for MPEG-TS UDP playback...")
+        Log.d(TAG, "Initializing Media3 ExoPlayer for low-latency MPEG-TS UDP playback...")
 
-        // Configure ultra-low-latency load control for live camera viewfinder (50ms start buffer)
+        // Configure ultra-low-latency load control for live camera viewfinder
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                200,   // Min buffer ms (fast startup)
-                1000,  // Max buffer ms
-                50,    // Buffer for playback ms (instant first frame)
-                100    // Buffer for playback after rebuffer ms
+                100,   // Min buffer ms
+                250,   // Max buffer ms (tight live cap)
+                16,    // Buffer for playback ms (~1 frame at 60fps)
+                32     // Buffer for playback after rebuffer ms
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
@@ -91,18 +125,22 @@ class StreamPlayerManager(private val context: Context) {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 when (playbackState) {
                     Player.STATE_IDLE -> {
+                        stopCatchUpLoop()
                         _playbackStateLabel.value = "IDLE"
                         _playerState.value = PlayerState.Idle
                     }
                     Player.STATE_BUFFERING -> {
+                        stopCatchUpLoop()
                         _playbackStateLabel.value = "BUFFERING"
                         _playerState.value = PlayerState.Buffering
                     }
                     Player.STATE_READY -> {
                         _playbackStateLabel.value = "READY"
                         _playerState.value = PlayerState.Playing
+                        if (activeDataPipe != null) startCatchUpLoop()
                     }
                     Player.STATE_ENDED -> {
+                        stopCatchUpLoop()
                         _playbackStateLabel.value = "ENDED"
                         _playerState.value = PlayerState.Idle
                     }
@@ -147,7 +185,7 @@ class StreamPlayerManager(private val context: Context) {
         return player
     }
 
-    private fun createExtractorsFactory(): ExtractorsFactory {
+    fun createExtractorsFactory(): ExtractorsFactory {
         val tsPayloadFlags = DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
             DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS or
             DefaultTsPayloadReaderFactory.FLAG_IGNORE_AAC_STREAM or
@@ -205,6 +243,7 @@ class StreamPlayerManager(private val context: Context) {
     fun startPlaying(dataPipe: com.flexingg.goprohero9.data.stream.LiveStreamDataPipe) {
         _isFirstFrameRendered.value = false
         _lastPlayerError.value = ""
+        activeDataPipe = dataPipe
         val player = exoPlayer ?: initializePlayer()
 
         try {
@@ -238,6 +277,8 @@ class StreamPlayerManager(private val context: Context) {
     fun startPlaying(streamUri: String = LOOPBACK_STREAM_URI) {
         _isFirstFrameRendered.value = false
         _lastPlayerError.value = ""
+        activeDataPipe = null
+        stopCatchUpLoop()
         val player = exoPlayer ?: initializePlayer()
 
         try {
@@ -270,6 +311,8 @@ class StreamPlayerManager(private val context: Context) {
     }
 
     fun stop() {
+        activeDataPipe = null
+        stopCatchUpLoop()
         exoPlayer?.stop()
         _playerState.value = PlayerState.Idle
         _isFirstFrameRendered.value = false
@@ -277,6 +320,8 @@ class StreamPlayerManager(private val context: Context) {
     }
 
     fun release() {
+        activeDataPipe = null
+        stopCatchUpLoop()
         exoPlayer?.release()
         exoPlayer = null
         _playerState.value = PlayerState.Idle

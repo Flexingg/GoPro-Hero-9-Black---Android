@@ -2,10 +2,16 @@ package com.flexingg.goprohero9.viewmodel
 
 import android.app.Application
 import android.bluetooth.BluetoothManager
+import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.net.Network
+import android.os.Build
 import android.os.Environment
+import android.provider.MediaStore
 import android.util.Log
+import android.widget.Toast
+import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.flexingg.goprohero9.buffer.CircularClipBuffer
@@ -18,10 +24,12 @@ import com.flexingg.goprohero9.data.wifi.WifiConnectionState
 import com.flexingg.goprohero9.player.PlayerState
 import com.flexingg.goprohero9.player.StreamPlayerManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 data class SavedClip(
@@ -503,16 +511,30 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val moviesDir = getClipsDirectory()
 
-            // Concurrently dump instant local MPEG-TS circular buffer
+            // 1. Concurrently dump instant local MPEG-TS circular buffer & immediately register it
             val instantTsFile = File(moviesDir, "GoPro_Instant_${System.currentTimeMillis()}.ts")
-            clipBuffer.dumpBufferToFile(instantTsFile)
+            val dumped = clipBuffer.dumpBufferToFile(instantTsFile)
+            if (dumped && instantTsFile.exists() && instantTsFile.length() > 0) {
+                val instantClip = SavedClip(
+                    title = "Stream Clip (${duration}s)",
+                    localPath = instantTsFile.absolutePath,
+                    isFullResMaster = false,
+                    fileSizeFormatted = formatFileSize(instantTsFile.length()),
+                    timestamp = System.currentTimeMillis()
+                )
+                addClip(instantClip)
+                _uiState.value = _uiState.value.copy(
+                    statusMessage = "Instant clip saved (${instantClip.fileSizeFormatted})! Checking camera for 4K master..."
+                )
+            }
 
-            // Camera HindSight full 4K/5K retrospective master trigger
+            // 2. Camera HindSight full 4K/5K retrospective master trigger
             val hindSightOk = httpClient.triggerHindSightClip(duration)
             if (hindSightOk) {
                 _uiState.value = _uiState.value.copy(
-                    statusMessage = "HindSight committed to SD card! Syncing 4K master..."
+                    statusMessage = "HindSight committed! Syncing 4K master..."
                 )
+                delay(1000)
 
                 val latestMedia = httpClient.getLatestMediaFile()
                 if (latestMedia != null) {
@@ -524,34 +546,35 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
 
-                    if (downloadOk) {
+                    if (downloadOk && masterFile.exists() && masterFile.length() > 0) {
                         val masterClip = SavedClip(
                             title = "4K Master (${latestMedia.filename})",
                             localPath = masterFile.absolutePath,
                             isFullResMaster = true,
-                            fileSizeFormatted = "${masterFile.length() / (1024 * 1024)} MB",
+                            fileSizeFormatted = formatFileSize(masterFile.length()),
                             timestamp = System.currentTimeMillis()
                         )
                         addClip(masterClip)
                         _uiState.value = _uiState.value.copy(
-                            statusMessage = "Full-resolution 4K Master saved!"
+                            statusMessage = "Full-resolution 4K Master saved (${masterClip.fileSizeFormatted})!"
+                        )
+                    } else {
+                        _uiState.value = _uiState.value.copy(
+                            statusMessage = if (dumped) "Saved instant stream clip (4K download unavailable)" else "Clip failed"
                         )
                     }
+                } else {
+                    _uiState.value = _uiState.value.copy(
+                        statusMessage = if (dumped) "Saved instant stream clip (no new SD file found)" else "Clip failed"
+                    )
                 }
             } else {
                 _uiState.value = _uiState.value.copy(
-                    statusMessage = "Saved instant stream clip (${instantTsFile.name})"
+                    statusMessage = if (dumped)
+                        "Saved instant stream clip (${formatFileSize(instantTsFile.length())})"
+                    else
+                        "No stream packets buffered yet to clip"
                 )
-                if (instantTsFile.exists() && instantTsFile.length() > 0) {
-                    val instantClip = SavedClip(
-                        title = "Stream Clip (${duration}s)",
-                        localPath = instantTsFile.absolutePath,
-                        isFullResMaster = false,
-                        fileSizeFormatted = "${instantTsFile.length() / (1024 * 1024)} MB",
-                        timestamp = System.currentTimeMillis()
-                    )
-                    addClip(instantClip)
-                }
             }
 
             _uiState.value = _uiState.value.copy(
@@ -561,8 +584,131 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun exportClipToDownloads(clip: SavedClip) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val sourceFile = File(clip.localPath)
+            if (!sourceFile.exists()) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Clip file not found on disk", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+
+            try {
+                val isMp4 = sourceFile.extension.equals("mp4", ignoreCase = true)
+                val mimeType = if (isMp4) "video/mp4" else "video/mp2t"
+                val fileName = sourceFile.name
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val resolver = context.contentResolver
+                    val collection = if (isMp4) {
+                        MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                    } else {
+                        MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                    }
+                    val relativeDir = if (isMp4) {
+                        "${Environment.DIRECTORY_MOVIES}/GoProClips"
+                    } else {
+                        "${Environment.DIRECTORY_DOWNLOADS}/GoProClips"
+                    }
+
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                        put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, relativeDir)
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
+
+                    val uri = resolver.insert(collection, values)
+                        ?: throw IllegalStateException("MediaStore insert returned null")
+
+                    resolver.openOutputStream(uri)?.use { out ->
+                        sourceFile.inputStream().use { input ->
+                            input.copyTo(out)
+                        }
+                    } ?: throw IllegalStateException("Failed to open output stream")
+
+                    values.clear()
+                    values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+
+                    withContext(Dispatchers.Main) {
+                        val destLabel = if (isMp4) "Movies/GoProClips" else "Downloads/GoProClips"
+                        Toast.makeText(context, "Saved to $destLabel/$fileName", Toast.LENGTH_LONG).show()
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    val downloadsDir = File(
+                        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                        "GoProClips"
+                    )
+                    if (!downloadsDir.exists()) downloadsDir.mkdirs()
+                    val destFile = File(downloadsDir, fileName)
+                    sourceFile.copyTo(destFile, overwrite = true)
+
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Saved to Downloads/GoProClips/$fileName", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to export clip: ${e.message}", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Export failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    fun shareClip(activityContext: Context, clip: SavedClip) {
+        val file = File(clip.localPath)
+        if (!file.exists()) {
+            Toast.makeText(activityContext, "Clip file not found", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            val uri = FileProvider.getUriForFile(
+                activityContext,
+                "${activityContext.packageName}.fileprovider",
+                file
+            )
+            val mimeType = if (file.extension.equals("mp4", ignoreCase = true)) "video/mp4" else "video/mp2t"
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = mimeType
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            activityContext.startActivity(Intent.createChooser(intent, "Share GoPro Clip"))
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to share clip: ${e.message}", e)
+            Toast.makeText(activityContext, "Share failed: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun deleteClip(clip: SavedClip) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val file = File(clip.localPath)
+                if (file.exists()) file.delete()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to delete clip file: ${e.message}")
+            }
+            _uiState.value = _uiState.value.copy(
+                savedClips = _uiState.value.savedClips.filterNot { it.localPath == clip.localPath }
+            )
+        }
+    }
+
+    private fun formatFileSize(bytes: Long): String {
+        if (bytes < 1024L * 1024L) {
+            val kb = (bytes / 1024L).coerceAtLeast(1L)
+            return "$kb KB"
+        }
+        val mb = bytes / (1024.0 * 1024.0)
+        return "%.1f MB".format(mb)
+    }
+
     private fun addClip(clip: SavedClip) {
-        val updated = listOf(clip) + _uiState.value.savedClips
+        val updated = listOf(clip) + _uiState.value.savedClips.filterNot { it.localPath == clip.localPath }
         _uiState.value = _uiState.value.copy(savedClips = updated)
     }
 
@@ -575,13 +721,13 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadLocalClips() {
         viewModelScope.launch(Dispatchers.IO) {
             val dir = getClipsDirectory()
-            val files = dir.listFiles()?.filter { it.extension in listOf("mp4", "ts") } ?: emptyList()
+            val files = dir.listFiles()?.filter { it.extension in listOf("mp4", "ts") && it.length() > 0 } ?: emptyList()
             val clips = files.sortedByDescending { it.lastModified() }.map { file ->
                 SavedClip(
                     title = file.name,
                     localPath = file.absolutePath,
                     isFullResMaster = file.name.contains("Master", ignoreCase = true),
-                    fileSizeFormatted = "${file.length() / (1024 * 1024)} MB",
+                    fileSizeFormatted = formatFileSize(file.length()),
                     timestamp = file.lastModified()
                 )
             }

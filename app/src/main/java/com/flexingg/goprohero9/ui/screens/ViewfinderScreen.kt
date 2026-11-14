@@ -523,6 +523,10 @@ fun ViewfinderScreen(
         ) {
             MediaGallerySheet(
                 clips = uiState.savedClips,
+                tsExtractorsFactory = viewModel.playerManager.createExtractorsFactory(),
+                onExportClip = { viewModel.exportClipToDownloads(it) },
+                onShareClip = { viewModel.shareClip(context, it) },
+                onDeleteClip = { viewModel.deleteClip(it) },
                 onClose = { isGalleryOpen = false }
             )
         }

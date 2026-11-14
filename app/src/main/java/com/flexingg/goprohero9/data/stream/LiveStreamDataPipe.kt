@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
  * 3. Kernel socket buffer overflows and dropped UDP packets.
  */
 @OptIn(UnstableApi::class)
-class LiveStreamDataPipe(private val maxQueueSize: Int = 800) {
+class LiveStreamDataPipe(private val maxQueueSize: Int = 200) {
     companion object {
         private const val TAG = "LiveStreamDataPipe"
     }
@@ -31,6 +31,8 @@ class LiveStreamDataPipe(private val maxQueueSize: Int = 800) {
     @Volatile
     var isRunning: Boolean = true
         private set
+
+    fun queueSize(): Int = packetQueue.size
 
     fun open() {
         packetQueue.clear()
