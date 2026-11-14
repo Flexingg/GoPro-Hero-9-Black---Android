@@ -23,10 +23,10 @@ object LivingFlowTokens {
     val LivingCrimson = Color(0xFFFF3366)
     val LivingElectricBlue = Color(0xFF007AFF)
 
-    // Frosted Glass Layer Colors (Dark & Light)
-    val DarkGlassBackgroundThin = Color(0x33101520)
-    val DarkGlassBackgroundRegular = Color(0x66101520)
-    val DarkGlassBackgroundThick = Color(0xAA080B10)
+    // Frosted Glass Layer Colors (Dark & Light) - higher opacity for crisp readability over video
+    val DarkGlassBackgroundThin = Color(0x88101520)
+    val DarkGlassBackgroundRegular = Color(0xBD0D121B)
+    val DarkGlassBackgroundThick = Color(0xE6080B12)
 
     val LightGlassBackgroundThin = Color(0x44FFFFFF)
     val LightGlassBackgroundRegular = Color(0x88F0F4F8)

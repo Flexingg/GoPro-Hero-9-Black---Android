@@ -389,40 +389,6 @@ fun ViewfinderScreen(
             }
         }
 
-        // 5. Status Notification Pill + Tap to Inspect
-        if (uiState.statusMessage.isNotEmpty()) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 115.dp, start = 20.dp, end = 20.dp)
-            ) {
-                LuminousGlassCard(
-                    shape = RoundedCornerShape(LivingFlowTokens.RadiusPill),
-                    thickness = GlassThickness.THIN,
-                    modifier = Modifier.clickable { isDiagnosticsOpen = true }
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = uiState.statusMessage,
-                            color = LivingFlowTokens.LivingCyan,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Icon(
-                            imageVector = Icons.Default.Tune,
-                            contentDescription = "Inspect",
-                            tint = Color(0x88FFFFFF),
-                            modifier = Modifier.size(12.dp)
-                        )
-                    }
-                }
-            }
-        }
-
         // 6. Download / Sync Progress Bar
         if (uiState.isClipping || uiState.clipDownloadProgress > 0f) {
             Column(

@@ -23,18 +23,31 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -44,15 +57,27 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.ui.PlayerView
 import com.flexingg.goprohero9.ui.theme.LivingFlowTokens
 import com.flexingg.goprohero9.viewmodel.SavedClip
+import kotlinx.coroutines.delay
 import java.io.File
+import kotlin.math.roundToLong
+
+private enum class ReplaySpeed(val label: String, val speedMultiplier: Float) {
+    ONE_FPS("1 FPS", 0f),
+    QUARTER("0.25x", 0.25f),
+    HALF("0.5x", 0.5f),
+    NORMAL("1x", 1.0f),
+    DOUBLE("2x", 2.0f)
+}
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -65,8 +90,18 @@ fun ClipPlayerDialog(
 ) {
     val context = LocalContext.current
 
+    var selectedSpeed by remember { mutableStateOf(ReplaySpeed.NORMAL) }
+    var isVarPlaying by remember { mutableStateOf(true) }
+    var currentPosMs by remember { mutableLongStateOf(0L) }
+    var durationMs by remember { mutableLongStateOf(0L) }
+    var detectedFps by remember { mutableFloatStateOf(60f) }
+    var isScrubbing by remember { mutableStateOf(false) }
+    var scrubPosMs by remember { mutableLongStateOf(0L) }
+
     val clipPlayer = remember(clip.localPath) {
         ExoPlayer.Builder(context).build().apply {
+            setSeekParameters(SeekParameters.EXACT)
+            repeatMode = Player.REPEAT_MODE_ONE
             val file = File(clip.localPath)
             val uri = Uri.fromFile(file)
             if (file.extension.equals("ts", ignoreCase = true)) {
@@ -86,6 +121,56 @@ fun ClipPlayerDialog(
         }
     }
 
+    val frameStepMs = remember(detectedFps) {
+        if (detectedFps > 0f) (1000f / detectedFps).roundToLong().coerceAtLeast(16L) else 17L
+    }
+
+    fun stepFrame(direction: Int) {
+        isVarPlaying = false
+        clipPlayer.pause()
+        val dur = clipPlayer.duration.coerceAtLeast(0L)
+        val base = clipPlayer.currentPosition.coerceAtLeast(0L)
+        val target = if (dur > 0L) {
+            (base + (direction * frameStepMs)).coerceIn(0L, dur)
+        } else {
+            (base + (direction * frameStepMs)).coerceAtLeast(0L)
+        }
+        clipPlayer.seekTo(target)
+        currentPosMs = target
+    }
+
+    // Poll player position and format FPS smoothly
+    LaunchedEffect(clipPlayer) {
+        while (true) {
+            if (!isScrubbing) {
+                currentPosMs = clipPlayer.currentPosition.coerceAtLeast(0L)
+            }
+            val dur = clipPlayer.duration
+            if (dur > 0L) durationMs = dur
+            val fps = clipPlayer.videoFormat?.frameRate ?: -1f
+            if (fps > 1f) detectedFps = fps
+            delay(40L)
+        }
+    }
+
+    // Handle 1 FPS stepping mode vs normal ExoPlayer speed mode
+    LaunchedEffect(selectedSpeed, isVarPlaying, frameStepMs) {
+        if (selectedSpeed == ReplaySpeed.ONE_FPS) {
+            clipPlayer.pause()
+            while (isVarPlaying && selectedSpeed == ReplaySpeed.ONE_FPS) {
+                delay(1000L)
+                val dur = clipPlayer.duration.coerceAtLeast(0L)
+                val next = clipPlayer.currentPosition + frameStepMs
+                val wrapped = if (dur > 0L && next >= dur) 0L else next
+                clipPlayer.seekTo(wrapped)
+                currentPosMs = wrapped
+            }
+        } else {
+            clipPlayer.setPlaybackSpeed(selectedSpeed.speedMultiplier)
+            clipPlayer.playWhenReady = isVarPlaying
+        }
+    }
+
     DisposableEffect(clip.localPath) {
         onDispose {
             clipPlayer.release()
@@ -99,34 +184,53 @@ fun ClipPlayerDialog(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xF2040608))
+                .background(Color(0xF5040608))
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(16.dp)
+                    .padding(horizontal = 14.dp, vertical = 12.dp)
             ) {
                 // Top Header
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 24.dp, bottom = 12.dp),
+                        .padding(top = 18.dp, bottom = 10.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(LivingFlowTokens.LivingCyan)
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = "VAR REPLAY",
+                                    color = Color.Black,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                            Text(
+                                text = clip.title,
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = clip.title,
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = "${if (clip.isFullResMaster) "4K Master" else "Instant Stream Clip"} • ${clip.fileSizeFormatted}",
+                            text = "${if (clip.isFullResMaster) "4K Master" else "Stream Clip"} • ${clip.fileSizeFormatted} • ${detectedFps.toInt()} fps",
                             color = if (clip.isFullResMaster) LivingFlowTokens.LivingCyan else LivingFlowTokens.LivingEmerald,
-                            fontSize = 12.sp
+                            fontSize = 11.sp
                         )
                     }
 
@@ -135,7 +239,7 @@ fun ClipPlayerDialog(
                         modifier = Modifier
                             .size(36.dp)
                             .clip(CircleShape)
-                            .background(Color(0x33FFFFFF))
+                            .background(Color(0x44FFFFFF))
                     ) {
                         Icon(
                             imageVector = Icons.Default.Close,
@@ -146,14 +250,15 @@ fun ClipPlayerDialog(
                     }
                 }
 
-                // Video Player Surface with Controls
+                // Clean Video Viewport (tap to toggle Play/Pause)
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(LivingFlowTokens.RadiusMedium))
                         .background(Color.Black)
-                        .border(1.dp, Color(0x22FFFFFF), RoundedCornerShape(LivingFlowTokens.RadiusMedium))
+                        .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(LivingFlowTokens.RadiusMedium))
+                        .clickable { isVarPlaying = !isVarPlaying }
                 ) {
                     AndroidView(
                         factory = { ctx ->
@@ -162,75 +267,276 @@ fun ClipPlayerDialog(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
                                     ViewGroup.LayoutParams.MATCH_PARENT
                                 )
-                                useController = true
+                                useController = false
                                 player = clipPlayer
                             }
                         },
                         modifier = Modifier.fillMaxSize()
                     )
-                }
 
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Bottom Action Buttons: Save to Phone & Share
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Row(
+                    // Subtle VAR speed + millisecond HUD pill
+                    Box(
                         modifier = Modifier
-                            .weight(1f)
+                            .align(Alignment.TopStart)
+                            .padding(10.dp)
                             .clip(RoundedCornerShape(LivingFlowTokens.RadiusPill))
-                            .background(LivingFlowTokens.LivingCyan)
-                            .clickable { onDownload() }
-                            .padding(vertical = 12.dp),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
+                            .background(Color(0xAA080B12))
+                            .border(1.dp, Color(0x44FFFFFF), RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Download,
-                            contentDescription = "Save to Phone",
-                            tint = Color.Black,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Save to Phone",
-                            color = Color.Black,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
+                            text = "${selectedSpeed.label}  •  ${formatTimecodeMs(if (isScrubbing) scrubPosMs else currentPosMs)}",
+                            color = LivingFlowTokens.LivingCyan,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
                         )
                     }
+                }
 
-                    Row(
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Mobile-Optimized VAR Control Deck
+                LuminousGlassCard(
+                    shape = RoundedCornerShape(LivingFlowTokens.RadiusMedium),
+                    thickness = GlassThickness.THICK,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
                         modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(LivingFlowTokens.RadiusPill))
-                            .background(Color(0x33FFFFFF))
-                            .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(LivingFlowTokens.RadiusPill))
-                            .clickable { onShare() }
-                            .padding(vertical = 12.dp),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Share,
-                            contentDescription = "Share Clip",
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Share / Open",
-                            color = Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                        // Timeline Scrubber + Millisecond Timecodes
+                        Column {
+                            val maxDur = durationMs.coerceAtLeast(1L).toFloat()
+                            val sliderVal = (if (isScrubbing) scrubPosMs else currentPosMs).toFloat().coerceIn(0f, maxDur)
+                            Slider(
+                                value = sliderVal,
+                                onValueChange = { newVal ->
+                                    isScrubbing = true
+                                    scrubPosMs = newVal.toLong()
+                                    clipPlayer.seekTo(scrubPosMs)
+                                },
+                                onValueChangeFinished = {
+                                    currentPosMs = scrubPosMs
+                                    isScrubbing = false
+                                },
+                                valueRange = 0f..maxDur,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = LivingFlowTokens.LivingCyan,
+                                    activeTrackColor = LivingFlowTokens.LivingCyan,
+                                    inactiveTrackColor = Color(0x44FFFFFF)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(28.dp)
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = formatTimecodeMs(if (isScrubbing) scrubPosMs else currentPosMs),
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    text = formatTimecodeMs(durationMs),
+                                    color = Color(0x99FFFFFF),
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+
+                        // Frame-by-Frame Transport Row: [-1 Frame] [Play/Pause] [+1 Frame]
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // -1 Frame
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
+                                    .clip(RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                                    .background(Color(0x28FFFFFF))
+                                    .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                                    .clickable { stepFrame(-1) },
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.SkipPrevious,
+                                    contentDescription = "Previous Frame",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "1 Frame",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+
+                            // Play / Pause
+                            Box(
+                                modifier = Modifier
+                                    .size(52.dp)
+                                    .clip(CircleShape)
+                                    .background(LivingFlowTokens.LivingCyan)
+                                    .clickable { isVarPlaying = !isVarPlaying },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (isVarPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                    contentDescription = if (isVarPlaying) "Pause" else "Play",
+                                    tint = Color.Black,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            }
+
+                            // +1 Frame
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
+                                    .clip(RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                                    .background(Color(0x28FFFFFF))
+                                    .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                                    .clickable { stepFrame(+1) },
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "1 Frame",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Icon(
+                                    imageVector = Icons.Default.SkipNext,
+                                    contentDescription = "Next Frame",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+
+                        // Speed Selector Pills: 1 FPS | 0.25x | 0.5x | 1x | 2x
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            ReplaySpeed.entries.forEach { speed ->
+                                val isSelected = selectedSpeed == speed
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                                        .background(
+                                            if (isSelected) LivingFlowTokens.LivingCyan else Color(0x22FFFFFF)
+                                        )
+                                        .border(
+                                            width = 1.dp,
+                                            color = if (isSelected) LivingFlowTokens.LivingCyan else Color(0x28FFFFFF),
+                                            shape = RoundedCornerShape(LivingFlowTokens.RadiusPill)
+                                        )
+                                        .clickable {
+                                            selectedSpeed = speed
+                                            if (speed == ReplaySpeed.ONE_FPS && !isVarPlaying) {
+                                                isVarPlaying = true
+                                            }
+                                        }
+                                        .padding(vertical = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = speed.label,
+                                        color = if (isSelected) Color.Black else Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+
+                        // Bottom Export Row: Save to Phone | Share
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                                    .background(Color(0x2200E5FF))
+                                    .border(1.dp, LivingFlowTokens.LivingCyan, RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                                    .clickable { onDownload() }
+                                    .padding(vertical = 10.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Download,
+                                    contentDescription = "Save to Phone",
+                                    tint = LivingFlowTokens.LivingCyan,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Save to Phone",
+                                    color = LivingFlowTokens.LivingCyan,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                                    .background(Color(0x28FFFFFF))
+                                    .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                                    .clickable { onShare() }
+                                    .padding(vertical = 10.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Share,
+                                    contentDescription = "Share Clip",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Share / Open",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
     }
+}
+
+private fun formatTimecodeMs(ms: Long): String {
+    val safeMs = ms.coerceAtLeast(0L)
+    val totalSeconds = safeMs / 1000L
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    val millis = safeMs % 1000L
+    return "%02d:%02d.%03d".format(minutes, seconds, millis)
 }
