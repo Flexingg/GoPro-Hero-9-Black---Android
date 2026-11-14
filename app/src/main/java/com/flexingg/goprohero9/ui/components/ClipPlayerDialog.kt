@@ -1,6 +1,7 @@
 package com.flexingg.goprohero9.ui.components
 
 import android.net.Uri
+import android.view.LayoutInflater
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.annotation.OptIn
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Pause
@@ -38,6 +40,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,6 +61,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -65,9 +69,14 @@ import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.ui.PlayerView
+import com.flexingg.goprohero9.R
+import com.flexingg.goprohero9.ml.CardDetection
+import com.flexingg.goprohero9.ml.PlayingCardDetector
 import com.flexingg.goprohero9.ui.theme.LivingFlowTokens
 import com.flexingg.goprohero9.viewmodel.SavedClip
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.roundToLong
 
@@ -95,13 +104,28 @@ fun ClipPlayerDialog(
     var currentPosMs by remember { mutableLongStateOf(0L) }
     var durationMs by remember { mutableLongStateOf(0L) }
     var detectedFps by remember { mutableFloatStateOf(60f) }
+    var videoWidth by remember { mutableIntStateOf(848) }
+    var videoHeight by remember { mutableIntStateOf(480) }
     var isScrubbing by remember { mutableStateOf(false) }
     var scrubPosMs by remember { mutableLongStateOf(0L) }
+
+    var isCardAiEnabled by remember { mutableStateOf(true) }
+    var varPlayerView by remember { mutableStateOf<PlayerView?>(null) }
+    var frameDetections by remember { mutableStateOf<List<CardDetection>>(emptyList()) }
+    var frameScanTrigger by remember { mutableIntStateOf(0) }
 
     val clipPlayer = remember(clip.localPath) {
         ExoPlayer.Builder(context).build().apply {
             setSeekParameters(SeekParameters.EXACT)
             repeatMode = Player.REPEAT_MODE_ONE
+            addListener(object : Player.Listener {
+                override fun onVideoSizeChanged(videoSize: VideoSize) {
+                    if (videoSize.width > 0 && videoSize.height > 0) {
+                        videoWidth = videoSize.width
+                        videoHeight = videoSize.height
+                    }
+                }
+            })
             val file = File(clip.localPath)
             val uri = Uri.fromFile(file)
             if (file.extension.equals("ts", ignoreCase = true)) {
@@ -137,6 +161,7 @@ fun ClipPlayerDialog(
         }
         clipPlayer.seekTo(target)
         currentPosMs = target
+        frameScanTrigger++
     }
 
     // Poll player position and format FPS smoothly
@@ -164,10 +189,35 @@ fun ClipPlayerDialog(
                 val wrapped = if (dur > 0L && next >= dur) 0L else next
                 clipPlayer.seekTo(wrapped)
                 currentPosMs = wrapped
+                frameScanTrigger++
             }
         } else {
             clipPlayer.setPlaybackSpeed(selectedSpeed.speedMultiplier)
             clipPlayer.playWhenReady = isVarPlaying
+        }
+    }
+
+    // Run Playing Card AI detection on current VAR frame (on pause/step/scrub AND continuously during playback)
+    LaunchedEffect(isCardAiEnabled, isVarPlaying, frameScanTrigger, currentPosMs / 160L, varPlayerView) {
+        if (!isCardAiEnabled) {
+            frameDetections = emptyList()
+            return@LaunchedEffect
+        }
+        // Small settle delay after a seek/frame-step so TextureView renders the new frame
+        if (!isVarPlaying || selectedSpeed == ReplaySpeed.ONE_FPS) {
+            delay(65L)
+        }
+        val tv = PlayingCardDetector.findTextureView(varPlayerView)
+        val bmp = tv?.getBitmap()
+        if (bmp != null) {
+            val detected = withContext(Dispatchers.Default) {
+                try {
+                    PlayingCardDetector.detect(bmp)
+                } finally {
+                    bmp.recycle()
+                }
+            }
+            frameDetections = detected
         }
     }
 
@@ -234,6 +284,40 @@ fun ClipPlayerDialog(
                         )
                     }
 
+                    // Card AI Toggle Pill
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                            .background(if (isCardAiEnabled) LivingFlowTokens.LivingCyan else Color(0x33FFFFFF))
+                            .border(
+                                1.dp,
+                                if (isCardAiEnabled) LivingFlowTokens.LivingCyan else Color(0x44FFFFFF),
+                                RoundedCornerShape(LivingFlowTokens.RadiusPill)
+                            )
+                            .clickable {
+                                isCardAiEnabled = !isCardAiEnabled
+                                if (isCardAiEnabled) frameScanTrigger++
+                            }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = "Card AI",
+                            tint = if (isCardAiEnabled) Color.Black else LivingFlowTokens.LivingCyan,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Card AI",
+                            color = if (isCardAiEnabled) Color.Black else Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
                     IconButton(
                         onClick = onDismiss,
                         modifier = Modifier
@@ -250,7 +334,7 @@ fun ClipPlayerDialog(
                     }
                 }
 
-                // Clean Video Viewport (tap to toggle Play/Pause)
+                // Clean Video Viewport (TextureView + Card AI Bounding Box Overlay)
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -262,17 +346,31 @@ fun ClipPlayerDialog(
                 ) {
                     AndroidView(
                         factory = { ctx ->
-                            PlayerView(ctx).apply {
+                            (LayoutInflater.from(ctx).inflate(R.layout.viewfinder_player_view, null, false) as PlayerView).apply {
                                 layoutParams = FrameLayout.LayoutParams(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
                                     ViewGroup.LayoutParams.MATCH_PARENT
                                 )
                                 useController = false
                                 player = clipPlayer
+                                varPlayerView = this
                             }
+                        },
+                        update = { view ->
+                            varPlayerView = view
                         },
                         modifier = Modifier.fillMaxSize()
                     )
+
+                    // Playing Card Bounding Boxes + Rank/Suit Classifier Overlay
+                    if (isCardAiEnabled && frameDetections.isNotEmpty()) {
+                        CardDetectionOverlay(
+                            detections = frameDetections,
+                            videoWidth = videoWidth,
+                            videoHeight = videoHeight,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
 
                     // Subtle VAR speed + millisecond HUD pill
                     Box(
@@ -280,7 +378,7 @@ fun ClipPlayerDialog(
                             .align(Alignment.TopStart)
                             .padding(10.dp)
                             .clip(RoundedCornerShape(LivingFlowTokens.RadiusPill))
-                            .background(Color(0xAA080B12))
+                            .background(Color(0xCC080B12))
                             .border(1.dp, Color(0x44FFFFFF), RoundedCornerShape(LivingFlowTokens.RadiusPill))
                             .padding(horizontal = 10.dp, vertical = 4.dp)
                     ) {
@@ -291,6 +389,26 @@ fun ClipPlayerDialog(
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace
                         )
+                    }
+
+                    // Detected Cards Summary Pill on Frame
+                    if (isCardAiEnabled && frameDetections.isNotEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(10.dp)
+                                .clip(RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                                .background(Color(0xCC080B12))
+                                .border(1.dp, LivingFlowTokens.LivingEmerald, RoundedCornerShape(LivingFlowTokens.RadiusPill))
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "Cards: ${frameDetections.joinToString("  ") { it.label }}",
+                                color = LivingFlowTokens.LivingEmerald,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
 
@@ -318,10 +436,12 @@ fun ClipPlayerDialog(
                                     isScrubbing = true
                                     scrubPosMs = newVal.toLong()
                                     clipPlayer.seekTo(scrubPosMs)
+                                    frameScanTrigger++
                                 },
                                 onValueChangeFinished = {
                                     currentPosMs = scrubPosMs
                                     isScrubbing = false
+                                    frameScanTrigger++
                                 },
                                 valueRange = 0f..maxDur,
                                 colors = SliderDefaults.colors(

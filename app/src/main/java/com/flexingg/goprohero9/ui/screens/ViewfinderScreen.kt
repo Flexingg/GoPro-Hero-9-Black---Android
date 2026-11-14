@@ -33,6 +33,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.BluetoothSearching
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.PhotoLibrary
@@ -46,6 +47,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -66,6 +68,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
+import com.flexingg.goprohero9.ml.CardDetection
+import com.flexingg.goprohero9.ml.CardDetectionTracker
+import com.flexingg.goprohero9.ml.PlayingCardDetector
+import com.flexingg.goprohero9.ui.components.CardDetectionOverlay
 import com.flexingg.goprohero9.ui.components.ClipSelector
 import com.flexingg.goprohero9.ui.components.FluidCloudCapsule
 import com.flexingg.goprohero9.ui.components.GlassThickness
@@ -73,6 +79,9 @@ import com.flexingg.goprohero9.ui.components.HorizonIndicator
 import com.flexingg.goprohero9.ui.components.LuminousGlassCard
 import com.flexingg.goprohero9.ui.theme.LivingFlowTokens
 import com.flexingg.goprohero9.viewmodel.GoProViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -84,6 +93,40 @@ fun ViewfinderScreen(
     val context = LocalContext.current
     var isGalleryOpen by remember { mutableStateOf(false) }
     var isDiagnosticsOpen by remember { mutableStateOf(false) }
+    var isCardAiEnabled by remember { mutableStateOf(true) }
+    var livePlayerView by remember { mutableStateOf<PlayerView?>(null) }
+    var cardDetections by remember { mutableStateOf<List<CardDetection>>(emptyList()) }
+    val cardTracker = remember { CardDetectionTracker() }
+
+    val (videoW, videoH) = remember(uiState.streamResolution) {
+        val parts = uiState.streamResolution.split("x")
+        val w = parts.getOrNull(0)?.toIntOrNull() ?: 848
+        val h = parts.getOrNull(1)?.toIntOrNull() ?: 480
+        Pair(w, h)
+    }
+
+    LaunchedEffect(isCardAiEnabled, uiState.isStreaming, livePlayerView) {
+        if (!isCardAiEnabled || !uiState.isStreaming) {
+            cardTracker.reset()
+            cardDetections = emptyList()
+            return@LaunchedEffect
+        }
+        while (true) {
+            val tv = PlayingCardDetector.findTextureView(livePlayerView)
+            val bmp = tv?.getBitmap()
+            if (bmp != null) {
+                val detected = withContext(Dispatchers.Default) {
+                    try {
+                        cardTracker.update(PlayingCardDetector.detect(bmp))
+                    } finally {
+                        bmp.recycle()
+                    }
+                }
+                cardDetections = detected
+            }
+            delay(160L)
+        }
+    }
 
     Box(
         modifier = modifier
@@ -99,9 +142,11 @@ fun ViewfinderScreen(
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
                     player = viewModel.playerManager.initializePlayer()
+                    livePlayerView = this
                 }
             },
             update = { view ->
+                livePlayerView = view
                 if (view.player == null) {
                     view.player = viewModel.playerManager.initializePlayer()
                 }
@@ -114,7 +159,17 @@ fun ViewfinderScreen(
             modifier = Modifier.align(Alignment.Center)
         )
 
-        // 2. Top ColorOS 17 Fluid Cloud (流体云) Dynamic Island Capsule + Diagnostics Button
+        // Live Playing Card Bounding Box + Rank/Suit Classifier Overlay
+        if (isCardAiEnabled && cardDetections.isNotEmpty()) {
+            CardDetectionOverlay(
+                detections = cardDetections,
+                videoWidth = videoW,
+                videoHeight = videoH,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        // 2. Top ColorOS 17 Fluid Cloud (流体云) Dynamic Island Capsule + Card AI + Diagnostics Buttons
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -137,6 +192,26 @@ fun ViewfinderScreen(
             }
 
             Spacer(modifier = Modifier.width(8.dp))
+
+            // Playing Card AI Overlay Toggle Button
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .background(if (isCardAiEnabled) LivingFlowTokens.LivingCyan else LivingFlowTokens.DarkGlassBackgroundRegular)
+                    .border(1.dp, LivingFlowTokens.LuminousContourDark, CircleShape)
+                    .clickable { isCardAiEnabled = !isCardAiEnabled },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = "Card AI",
+                    tint = if (isCardAiEnabled) Color.Black else LivingFlowTokens.LivingCyan,
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(6.dp))
 
             // Luminous Diagnostics Inspector Button
             Box(
