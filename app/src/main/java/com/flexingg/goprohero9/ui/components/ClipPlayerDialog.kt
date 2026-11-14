@@ -126,23 +126,38 @@ fun ClipPlayerDialog(
                     }
                 }
             })
-            val file = File(clip.localPath)
-            val uri = Uri.fromFile(file)
-            if (file.extension.equals("ts", ignoreCase = true)) {
-                val dataSourceFactory = DefaultDataSource.Factory(context)
-                val mediaItem = MediaItem.Builder()
-                    .setUri(uri)
-                    .setMimeType(MimeTypes.VIDEO_MP2T)
-                    .build()
-                val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory, tsExtractorsFactory)
-                    .createMediaSource(mediaItem)
-                setMediaSource(mediaSource)
-            } else {
-                setMediaItem(MediaItem.fromUri(uri))
-            }
-            prepare()
-            playWhenReady = true
         }
+    }
+
+    LaunchedEffect(clip.localPath) {
+        val src = File(clip.localPath)
+        val targetFile = if (src.extension.equals("ts", ignoreCase = true)) {
+            val cachedMp4 = File(context.cacheDir, "${src.nameWithoutExtension}_seekable.mp4")
+            if (!cachedMp4.exists() || cachedMp4.length() == 0L) {
+                withContext(Dispatchers.IO) {
+                    com.flexingg.goprohero9.buffer.TsToMp4Remuxer.remux(src, cachedMp4)
+                }
+            }
+            if (cachedMp4.exists() && cachedMp4.length() > 0L) cachedMp4 else src
+        } else {
+            src
+        }
+
+        val uri = Uri.fromFile(targetFile)
+        if (targetFile.extension.equals("ts", ignoreCase = true)) {
+            val dataSourceFactory = DefaultDataSource.Factory(context)
+            val mediaItem = MediaItem.Builder()
+                .setUri(uri)
+                .setMimeType(MimeTypes.VIDEO_MP2T)
+                .build()
+            val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory, tsExtractorsFactory)
+                .createMediaSource(mediaItem)
+            clipPlayer.setMediaSource(mediaSource)
+        } else {
+            clipPlayer.setMediaItem(MediaItem.fromUri(uri))
+        }
+        clipPlayer.prepare()
+        clipPlayer.playWhenReady = true
     }
 
     val frameStepMs = remember(detectedFps) {

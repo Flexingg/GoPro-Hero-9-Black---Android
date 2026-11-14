@@ -11,8 +11,8 @@ android {
         applicationId = "com.flexingg.goprohero9"
         minSdk = 26
         targetSdk = 34
-        versionCode = 14
-        versionName = "0.0.14"
+        versionCode = 15
+        versionName = "0.0.15"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

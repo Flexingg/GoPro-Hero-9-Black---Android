@@ -511,15 +511,23 @@ class GoProViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val moviesDir = getClipsDirectory()
 
-            // 1. Concurrently dump instant local MPEG-TS circular buffer & immediately register it
-            val instantTsFile = File(moviesDir, "GoPro_Instant_${System.currentTimeMillis()}.ts")
+            // 1. Concurrently dump instant local MPEG-TS circular buffer & remux to seekable MP4
+            val nowTs = System.currentTimeMillis()
+            val instantTsFile = File(moviesDir, "GoPro_Instant_${nowTs}.ts")
+            val instantMp4File = File(moviesDir, "GoPro_Clip_${nowTs}.mp4")
             val dumped = clipBuffer.dumpBufferToFile(instantTsFile)
+            var finalInstantFile = instantTsFile
             if (dumped && instantTsFile.exists() && instantTsFile.length() > 0) {
+                val remuxed = com.flexingg.goprohero9.buffer.TsToMp4Remuxer.remux(instantTsFile, instantMp4File)
+                if (remuxed && instantMp4File.exists() && instantMp4File.length() > 0) {
+                    instantTsFile.delete()
+                    finalInstantFile = instantMp4File
+                }
                 val instantClip = SavedClip(
                     title = "Stream Clip (${duration}s)",
-                    localPath = instantTsFile.absolutePath,
+                    localPath = finalInstantFile.absolutePath,
                     isFullResMaster = false,
-                    fileSizeFormatted = formatFileSize(instantTsFile.length()),
+                    fileSizeFormatted = formatFileSize(finalInstantFile.length()),
                     timestamp = System.currentTimeMillis()
                 )
                 addClip(instantClip)
