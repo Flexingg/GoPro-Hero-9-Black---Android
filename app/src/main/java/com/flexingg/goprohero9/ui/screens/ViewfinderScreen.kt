@@ -68,10 +68,13 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
+import androidx.compose.material.icons.filled.CenterFocusStrong
 import com.flexingg.goprohero9.ml.CardDetection
 import com.flexingg.goprohero9.ml.CardDetectionTracker
+import com.flexingg.goprohero9.ml.CardTrainingStore
 import com.flexingg.goprohero9.ml.PlayingCardDetector
 import com.flexingg.goprohero9.ui.components.CardDetectionOverlay
+import com.flexingg.goprohero9.ui.components.CardTrainerOverlay
 import com.flexingg.goprohero9.ui.components.ClipSelector
 import com.flexingg.goprohero9.ui.components.FluidCloudCapsule
 import com.flexingg.goprohero9.ui.components.GlassThickness
@@ -91,9 +94,13 @@ fun ViewfinderScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
+    LaunchedEffect(context) {
+        CardTrainingStore.init(context)
+    }
     var isGalleryOpen by remember { mutableStateOf(false) }
     var isDiagnosticsOpen by remember { mutableStateOf(false) }
     var isCardAiEnabled by remember { mutableStateOf(true) }
+    var isCardTrainerOpen by remember { mutableStateOf(false) }
     var livePlayerView by remember { mutableStateOf<PlayerView?>(null) }
     var cardDetections by remember { mutableStateOf<List<CardDetection>>(emptyList()) }
     val cardTracker = remember { CardDetectionTracker() }
@@ -105,8 +112,8 @@ fun ViewfinderScreen(
         Pair(w, h)
     }
 
-    LaunchedEffect(isCardAiEnabled, uiState.isStreaming, livePlayerView) {
-        if (!isCardAiEnabled || !uiState.isStreaming) {
+    LaunchedEffect(isCardAiEnabled, isCardTrainerOpen, uiState.isStreaming, livePlayerView) {
+        if (!isCardAiEnabled || isCardTrainerOpen || !uiState.isStreaming) {
             cardTracker.reset()
             cardDetections = emptyList()
             return@LaunchedEffect
@@ -160,7 +167,7 @@ fun ViewfinderScreen(
         )
 
         // Live Playing Card Bounding Box + Rank/Suit Classifier Overlay
-        if (isCardAiEnabled && cardDetections.isNotEmpty()) {
+        if (isCardAiEnabled && !isCardTrainerOpen && cardDetections.isNotEmpty()) {
             CardDetectionOverlay(
                 detections = cardDetections,
                 videoWidth = videoW,
@@ -169,7 +176,7 @@ fun ViewfinderScreen(
             )
         }
 
-        // 2. Top ColorOS 17 Fluid Cloud (流体云) Dynamic Island Capsule + Card AI + Diagnostics Buttons
+        // 2. Top ColorOS 17 Fluid Cloud (流体云) Dynamic Island Capsule + Card AI + Train + Diagnostics Buttons
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -191,12 +198,12 @@ fun ViewfinderScreen(
                 )
             }
 
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(6.dp))
 
             // Playing Card AI Overlay Toggle Button
             Box(
                 modifier = Modifier
-                    .size(42.dp)
+                    .size(40.dp)
                     .clip(CircleShape)
                     .background(if (isCardAiEnabled) LivingFlowTokens.LivingCyan else LivingFlowTokens.DarkGlassBackgroundRegular)
                     .border(1.dp, LivingFlowTokens.LuminousContourDark, CircleShape)
@@ -207,7 +214,27 @@ fun ViewfinderScreen(
                     imageVector = Icons.Default.AutoAwesome,
                     contentDescription = "Card AI",
                     tint = if (isCardAiEnabled) Color.Black else LivingFlowTokens.LivingCyan,
-                    modifier = Modifier.size(19.dp)
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(6.dp))
+
+            // Train Card AI Button
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(if (isCardTrainerOpen) LivingFlowTokens.LivingEmerald else LivingFlowTokens.DarkGlassBackgroundRegular)
+                    .border(1.dp, LivingFlowTokens.LuminousContourDark, CircleShape)
+                    .clickable { isCardTrainerOpen = !isCardTrainerOpen },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CenterFocusStrong,
+                    contentDescription = "Train Card AI",
+                    tint = if (isCardTrainerOpen) Color.Black else LivingFlowTokens.LivingEmerald,
+                    modifier = Modifier.size(18.dp)
                 )
             }
 
@@ -569,6 +596,19 @@ fun ViewfinderScreen(
                 onShareClip = { viewModel.shareClip(context, it) },
                 onDeleteClip = { viewModel.deleteClip(it) },
                 onClose = { isGalleryOpen = false }
+            )
+        }
+
+        // 10. Interactive Card AI Trainer Overlay
+        if (isCardTrainerOpen) {
+            CardTrainerOverlay(
+                videoWidth = videoW,
+                videoHeight = videoH,
+                onSnapFrame = {
+                    PlayingCardDetector.findTextureView(livePlayerView)?.getBitmap()
+                },
+                onClose = { isCardTrainerOpen = false },
+                modifier = Modifier.fillMaxSize()
             )
         }
     }

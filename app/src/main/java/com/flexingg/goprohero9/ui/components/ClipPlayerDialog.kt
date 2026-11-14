@@ -98,6 +98,9 @@ fun ClipPlayerDialog(
     onShare: () -> Unit
 ) {
     val context = LocalContext.current
+    LaunchedEffect(context) {
+        com.flexingg.goprohero9.ml.CardTrainingStore.init(context)
+    }
 
     var selectedSpeed by remember { mutableStateOf(ReplaySpeed.NORMAL) }
     var isVarPlaying by remember { mutableStateOf(true) }
@@ -132,7 +135,7 @@ fun ClipPlayerDialog(
     LaunchedEffect(clip.localPath) {
         val src = File(clip.localPath)
         val targetFile = if (src.extension.equals("ts", ignoreCase = true)) {
-            val cachedMp4 = File(context.cacheDir, "${src.nameWithoutExtension}_seekable.mp4")
+            val cachedMp4 = File(context.cacheDir, "${src.nameWithoutExtension}_seekable_v2.mp4")
             if (!cachedMp4.exists() || cachedMp4.length() == 0L) {
                 withContext(Dispatchers.IO) {
                     com.flexingg.goprohero9.buffer.TsToMp4Remuxer.remux(src, cachedMp4)

@@ -136,7 +136,7 @@ object TsToMp4Remuxer {
                     sampleBuffer.write(allBytes, sampleEnd, allBytes.size - sampleEnd)
                 }
 
-                if (!muxerStarted || videoTrackIndex < 0 || size <= 0) return
+                if (!muxerStarted || videoTrackIndex < 0 || sampleEnd <= sampleStart) return
 
                 val isKeyframe = (flags and C.BUFFER_FLAG_KEY_FRAME) != 0
                 if (!seenKeyframe) {
@@ -144,24 +144,35 @@ object TsToMp4Remuxer {
                     seenKeyframe = true
                 }
 
+                val avccBytes = annexBToAvcc(allBytes, sampleStart, sampleEnd)
+                if (avccBytes.isEmpty()) return
+
+                val validTimeUs = if (timeUs != C.TIME_UNSET && timeUs >= 0L) {
+                    timeUs
+                } else if (lastPtsUs >= 0L) {
+                    lastPtsUs + 16_667L
+                } else {
+                    0L
+                }
+
                 val ptsUs = if (firstPtsUs < 0L) {
-                    firstPtsUs = timeUs
+                    firstPtsUs = validTimeUs
                     0L
                 } else {
-                    val normalized = (timeUs - firstPtsUs).coerceAtLeast(0L)
+                    val normalized = (validTimeUs - firstPtsUs).coerceAtLeast(0L)
                     if (normalized <= lastPtsUs) lastPtsUs + 16_667L else normalized
                 }
                 lastPtsUs = ptsUs
 
                 val info = MediaCodec.BufferInfo().apply {
                     this.offset = 0
-                    this.size = sampleEnd - sampleStart
+                    this.size = avccBytes.size
                     this.presentationTimeUs = ptsUs
                     this.flags = if (isKeyframe) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
                 }
 
                 try {
-                    val bb = ByteBuffer.wrap(allBytes, sampleStart, info.size)
+                    val bb = ByteBuffer.wrap(avccBytes)
                     muxer?.writeSampleData(videoTrackIndex, bb, info)
                     framesWritten++
                 } catch (e: Exception) {
@@ -217,5 +228,58 @@ object TsToMp4Remuxer {
             if (mp4File.exists()) mp4File.delete()
             false
         }
+    }
+
+    /**
+     * Converts Annex-B NAL units (00 00 01 or 00 00 00 01 start codes) into
+     * 4-byte big-endian length-prefixed AVCC/HVCC NAL units required by Android MediaMuxer.
+     */
+    private fun annexBToAvcc(data: ByteArray, start: Int, end: Int): ByteArray {
+        val out = ByteArrayOutputStream((end - start).coerceAtLeast(16))
+        var i = start
+        var currentNalStart = -1
+
+        while (i < end) {
+            val scLen = when {
+                i + 3 < end && data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
+                    data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte() -> 4
+                i + 2 < end && data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
+                    data[i + 2] == 1.toByte() -> 3
+                else -> 0
+            }
+            if (scLen > 0) {
+                if (currentNalStart >= 0 && i > currentNalStart) {
+                    writeAvccNal(out, data, currentNalStart, i)
+                }
+                i += scLen
+                currentNalStart = i
+            } else {
+                i++
+            }
+        }
+
+        if (currentNalStart >= 0) {
+            if (end > currentNalStart) {
+                writeAvccNal(out, data, currentNalStart, end)
+            }
+            return out.toByteArray()
+        }
+
+        // Fallback if sample was already non-Annex-B
+        return data.copyOfRange(start, end)
+    }
+
+    private fun writeAvccNal(out: ByteArrayOutputStream, data: ByteArray, nalStart: Int, nalEnd: Int) {
+        val len = nalEnd - nalStart
+        if (len <= 0) return
+        // Skip H.264 Access Unit Delimiter (AUD, type 9) if present
+        val nalType = data[nalStart].toInt() and 0x1F
+        if (nalType == 9 && len <= 2) return
+
+        out.write((len ushr 24) and 0xFF)
+        out.write((len ushr 16) and 0xFF)
+        out.write((len ushr 8) and 0xFF)
+        out.write(len and 0xFF)
+        out.write(data, nalStart, len)
     }
 }

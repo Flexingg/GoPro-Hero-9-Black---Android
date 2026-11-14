@@ -188,6 +188,22 @@ object PlayingCardDetector {
             )
         }
 
+        // 4. Fallback: if user has trained card samples, scan bright card-paper regions
+        //    for any cards missed by ML Kit OCR.
+        val trained = CardTrainingStore.samples
+        if (trained.isNotEmpty()) {
+            val trainedHits = detectWithTrainedTemplates(
+                sourceBitmap = sourceBitmap,
+                smallLum = smallLum,
+                smallChroma = smallChroma,
+                w = smallW,
+                h = smallH,
+                trained = trained,
+                existingDetections = detections
+            )
+            detections.addAll(trainedHits)
+        }
+
         return nonMaxSuppression(detections, iouThreshold = 0.35f)
     }
 
@@ -583,18 +599,45 @@ object PlayingCardDetector {
             listOf(CardSuit.SPADES, CardSuit.CLUBS)
         }
 
+        // Prepare zero-mean unit-norm version of patch for comparing against user-trained suit templates
+        val patchNorm = FloatArray(TEMPLATE_LEN)
+        var sum = 0f
+        for (v in patch) sum += v
+        val mean = sum / TEMPLATE_LEN
+        var normSq = 0f
+        for (i in patch.indices) {
+            val d = patch[i] - mean
+            patchNorm[i] = d
+            normSq += d * d
+        }
+        val norm = sqrt(normSq)
+        if (norm > 1e-4f) {
+            for (i in patchNorm.indices) patchNorm[i] /= norm
+        }
+
+        val trainedSamples = CardTrainingStore.samples
         var bestSuit = candidates.first()
         var bestCombined = -2f
         for (suit in candidates) {
             val tmpl = suitTemplates[suit] ?: continue
-            val ncc = normalizedCrossCorrelation(patch, tmpl)
+            val synthNcc = normalizedCrossCorrelation(patch, tmpl)
+            val trainedNcc = trainedSamples
+                .filter { it.suit == suit }
+                .maxOfOrNull { CardTrainingStore.ncc(patchNorm, it.suitTemplate) }
+
+            val baseNcc = if (trainedNcc != null) {
+                trainedNcc * 0.72f + synthNcc * 0.28f
+            } else {
+                synthNcc
+            }
+
             val geomBonus = when (suit) {
                 CardSuit.SPADES -> if (topWidth < midWidth * 0.72f) 0.16f else -0.06f
                 CardSuit.CLUBS -> if (topWidth >= midWidth * 0.68f) 0.12f else -0.04f
                 CardSuit.HEARTS -> if (topWidth > botWidth * 1.15f && topCenterInk < 0.7f) 0.16f else -0.04f
                 CardSuit.DIAMONDS -> if (midWidth >= topWidth * 1.15f && midWidth >= botWidth * 1.15f) 0.16f else -0.04f
             }
-            val score = ncc + geomBonus
+            val score = baseNcc + geomBonus
             if (score > bestCombined) {
                 bestCombined = score
                 bestSuit = suit
@@ -735,6 +778,142 @@ object PlayingCardDetector {
             if (!overlap) kept.add(det)
         }
         return kept
+    }
+
+    private fun detectWithTrainedTemplates(
+        sourceBitmap: Bitmap,
+        smallLum: IntArray,
+        smallChroma: IntArray,
+        w: Int,
+        h: Int,
+        trained: List<TrainedCardSample>,
+        existingDetections: List<CardDetection>
+    ): List<CardDetection> {
+        val visited = BooleanArray(w * h)
+        val q = IntArray(w * h)
+        val minArea = (w * h * 0.012f).toInt().coerceAtLeast(35)
+        val maxArea = (w * h * 0.36f).toInt()
+        val srcW = sourceBitmap.width
+        val srcH = sourceBitmap.height
+
+        val results = ArrayList<CardDetection>()
+
+        for (i in smallLum.indices) {
+            if (visited[i] || smallLum[i] < 102 || smallChroma[i] >= 80) continue
+
+            var head = 0
+            var tail = 0
+            q[tail++] = i
+            visited[i] = true
+            var minX = w
+            var maxX = 0
+            var minY = h
+            var maxY = 0
+            var count = 0
+
+            while (head < tail) {
+                val idx = q[head++]
+                val x = idx % w
+                val y = idx / w
+                count++
+                if (x < minX) minX = x
+                if (x > maxX) maxX = x
+                if (y < minY) minY = y
+                if (y > maxY) maxY = y
+
+                if (x > 0 && !visited[idx - 1] && smallLum[idx - 1] >= 102 && smallChroma[idx - 1] < 80) {
+                    visited[idx - 1] = true; q[tail++] = idx - 1
+                }
+                if (x + 1 < w && !visited[idx + 1] && smallLum[idx + 1] >= 102 && smallChroma[idx + 1] < 80) {
+                    visited[idx + 1] = true; q[tail++] = idx + 1
+                }
+                if (y > 0 && !visited[idx - w] && smallLum[idx - w] >= 102 && smallChroma[idx - w] < 80) {
+                    visited[idx - w] = true; q[tail++] = idx - w
+                }
+                if (y + 1 < h && !visited[idx + w] && smallLum[idx + w] >= 102 && smallChroma[idx + w] < 80) {
+                    visited[idx + w] = true; q[tail++] = idx + w
+                }
+            }
+
+            if (count < minArea || count > maxArea) continue
+
+            val cardNorm = RectF(
+                minX / w.toFloat(),
+                minY / h.toFloat(),
+                (maxX + 1) / w.toFloat(),
+                (maxY + 1) / h.toFloat()
+            )
+            if (existingDetections.any { computeIoU(it.boundingBox, cardNorm) > 0.25f }) continue
+
+            val cardW = (cardNorm.width() * srcW).toInt()
+            val cardH = (cardNorm.height() * srcH).toInt()
+            if (cardW < 24 || cardH < 28) continue
+
+            val cardLeft = (cardNorm.left * srcW).toInt().coerceIn(0, srcW - 1)
+            val cardTop = (cardNorm.top * srcH).toInt().coerceIn(0, srcH - 1)
+
+            // Search top-left corner at 2 scales
+            val cornerScales = floatArrayOf(0.20f, 0.27f)
+            var bestSample: TrainedCardSample? = null
+            var bestScore = 0.58f
+            var bestCornerRect: Rect? = null
+
+            for (cwFrac in cornerScales) {
+                val cw = (cardW * cwFrac).toInt().coerceIn(14, srcW / 3)
+                val ch = (cw * 1.45f).toInt().coerceIn(20, srcH / 3)
+                val dxSteps = intArrayOf(2, (cardW * 0.04f).toInt(), (cardW * 0.08f).toInt())
+                val dySteps = intArrayOf(2, (cardH * 0.03f).toInt(), (cardH * 0.06f).toInt())
+
+                for (dy in dySteps) {
+                    for (dx in dxSteps) {
+                        val cl = (cardLeft + dx).coerceIn(0, srcW - cw)
+                        val ct = (cardTop + dy).coerceIn(0, srcH - ch)
+                        val crop = Bitmap.createBitmap(sourceBitmap, cl, ct, cw, ch)
+                        val feat = try {
+                            CardTrainingStore.extractFeatures(crop)
+                        } finally {
+                            crop.recycle()
+                        }
+
+                        val isRed = feat.rednessScore > 14f
+                        for (s in trained) {
+                            // Respect color polarity when redness signal is clear
+                            if (feat.rednessScore > 20f && !s.suit.isRed) continue
+                            if (feat.rednessScore < 4f && s.suit.isRed) continue
+
+                            val score = CardTrainingStore.ncc(feat.cornerTemplate, s.cornerTemplate) * 0.55f +
+                                CardTrainingStore.ncc(feat.rankTemplate, s.rankTemplate) * 0.25f +
+                                CardTrainingStore.ncc(feat.suitTemplate, s.suitTemplate) * 0.20f
+                            if (score > bestScore) {
+                                bestScore = score
+                                bestSample = s
+                                bestCornerRect = Rect(cl, ct, cl + cw, ct + ch)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (bestSample != null && bestCornerRect != null) {
+                val cornerNorm = RectF(
+                    bestCornerRect.left / srcW.toFloat(),
+                    bestCornerRect.top / srcH.toFloat(),
+                    bestCornerRect.right / srcW.toFloat(),
+                    bestCornerRect.bottom / srcH.toFloat()
+                )
+                results.add(
+                    CardDetection(
+                        boundingBox = cardNorm,
+                        rank = bestSample.rank,
+                        suit = bestSample.suit,
+                        confidence = bestScore.coerceIn(0.60f, 0.99f),
+                        cornerBox = cornerNorm
+                    )
+                )
+            }
+        }
+
+        return results
     }
 
     fun computeIoU(a: RectF, b: RectF): Float {
