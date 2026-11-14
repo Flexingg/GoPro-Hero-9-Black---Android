@@ -189,7 +189,7 @@ object TsToMp4Remuxer {
                     val r = fis.read(buffer, offset, length)
                     if (r == -1) C.RESULT_END_OF_INPUT else r
                 }
-                val input = DefaultExtractorInput(dataReader, 0L, tsFile.length())
+                val input = DefaultExtractorInput(dataReader, 0L, C.LENGTH_UNSET.toLong())
                 val posHolder = PositionHolder()
                 while (true) {
                     val res = extractor.read(input, posHolder)

@@ -7,10 +7,14 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
-import android.graphics.Typeface
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -50,18 +54,22 @@ data class CardDetection(
 }
 
 /**
- * On-device playing card locator and rank/suit classifier.
- *
- * Stage 1: Fast downsampled (360px) adaptive white-card segmentation to locate card bounding boxes.
- * Stage 2: Full-resolution corner index crop + Otsu bimodal thresholding + red/black color prior +
- *          16x16 Normalized Cross-Correlation + geometric suit shape features.
+ * Hybrid On-Device ML Playing Card Detector:
+ * 1. Google ML Kit Text Recognition v2 (deep-learning OCR) locates & reads card corner ranks (A..K)
+ *    with exact bounding boxes across lighting, angles, and card fonts.
+ * 2. Full-resolution suit pip crop right below (or above if upside-down) the rank determines
+ *    Red (♥/♦) vs Black (♠/♣) and classifies suit shape via 16x16 NCC + geometric features.
+ * 3. Seeded white-card flood fill from the verified corner gives the exact card bounding box.
  */
 object PlayingCardDetector {
     private const val ANALYSIS_WIDTH = 360
     private const val TEMPLATE_SIZE = 16
     private const val TEMPLATE_LEN = TEMPLATE_SIZE * TEMPLATE_SIZE
 
-    private val rankTemplates: Map<CardRank, FloatArray> by lazy { buildRankTemplates() }
+    private val textRecognizer by lazy {
+        TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    }
+
     private val suitTemplates: Map<CardSuit, FloatArray> by lazy { buildSuitTemplates() }
 
     fun findTextureView(view: View?): TextureView? {
@@ -76,77 +84,369 @@ object PlayingCardDetector {
         return null
     }
 
-    fun detect(sourceBitmap: Bitmap): List<CardDetection> {
+    suspend fun detect(sourceBitmap: Bitmap): List<CardDetection> {
         val srcW = sourceBitmap.width
         val srcH = sourceBitmap.height
         if (srcW <= 0 || srcH <= 0) return emptyList()
 
-        val scale = ANALYSIS_WIDTH.toFloat() / srcW.toFloat()
-        val w = ANALYSIS_WIDTH
-        val h = (srcH * scale).toInt().coerceAtLeast(1)
+        val visionText = recognizeText(sourceBitmap) ?: return emptyList()
 
-        val scaled = Bitmap.createScaledBitmap(sourceBitmap, w, h, false)
-        val pixels = IntArray(w * h)
-        scaled.getPixels(pixels, 0, w, 0, 0, w, h)
-        if (scaled != sourceBitmap) {
-            scaled.recycle()
+        // Collect all candidate rank elements from ML Kit
+        val rankCandidates = ArrayList<Pair<CardRank, Rect>>()
+        for (block in visionText.textBlocks) {
+            for (line in block.lines) {
+                for (element in line.elements) {
+                    val box = element.boundingBox ?: continue
+                    val rank = parseCardRank(element.text) ?: continue
+                    if (box.width() < 6 || box.height() < 8) continue
+                    if (box.height() > srcH * 0.35f) continue
+                    rankCandidates.add(Pair(rank, box))
+                }
+            }
         }
 
-        // Compute luminance & adaptive white-card mask (resistant to dark wood tables & lamp glare)
-        val lum = IntArray(w * h)
-        var lumSum = 0L
-        for (i in pixels.indices) {
-            val c = pixels[i]
+        if (rankCandidates.isEmpty()) return emptyList()
+
+        // Prepare fast 360px luminance/chroma map for seeded card-box flood fill
+        val scale = ANALYSIS_WIDTH.toFloat() / srcW.toFloat()
+        val smallW = ANALYSIS_WIDTH
+        val smallH = (srcH * scale).toInt().coerceAtLeast(1)
+        val scaled = Bitmap.createScaledBitmap(sourceBitmap, smallW, smallH, false)
+        val smallPixels = IntArray(smallW * smallH)
+        scaled.getPixels(smallPixels, 0, smallW, 0, 0, smallW, smallH)
+        if (scaled != sourceBitmap) scaled.recycle()
+
+        val smallLum = IntArray(smallW * smallH)
+        val smallChroma = IntArray(smallW * smallH)
+        for (i in smallPixels.indices) {
+            val c = smallPixels[i]
+            val r = (c shr 16) and 0xFF
+            val g = (c shr 8) and 0xFF
+            val b = c and 0xFF
+            smallLum[i] = (r * 77 + g * 150 + b * 29) shr 8
+            smallChroma[i] = max(r, max(g, b)) - min(r, min(g, b))
+        }
+
+        val detections = ArrayList<CardDetection>()
+
+        for ((rank, rankBox) in rankCandidates) {
+            // 1. Check that the rank sits on bright card paper (and get local white reference)
+            val paperLum = samplePaperLuminanceAround(sourceBitmap, rankBox) ?: continue
+            if (paperLum < 95) continue
+
+            // 2. Check suit pip region below the rank (normal orientation) or above (upside-down)
+            val belowPipRect = Rect(
+                (rankBox.left - rankBox.width() * 0.45f).toInt().coerceIn(0, srcW - 1),
+                (rankBox.bottom + 1).coerceIn(0, srcH - 1),
+                (rankBox.right + rankBox.width() * 0.45f).toInt().coerceIn(1, srcW),
+                (rankBox.bottom + rankBox.height() * 1.45f).toInt().coerceIn(1, srcH)
+            )
+            val abovePipRect = Rect(
+                (rankBox.left - rankBox.width() * 0.45f).toInt().coerceIn(0, srcW - 1),
+                (rankBox.top - rankBox.height() * 1.45f).toInt().coerceIn(0, srcH - 1),
+                (rankBox.right + rankBox.width() * 0.45f).toInt().coerceIn(1, srcW),
+                (rankBox.top - 1).coerceIn(1, srcH)
+            )
+
+            val rankRedRatio = measureRedRatio(sourceBitmap, rankBox, paperLum)
+            val belowMatch = classifySuitInRegion(sourceBitmap, belowPipRect, paperLum, rankRedRatio, upsideDown = false)
+            val aboveMatch = if (belowMatch == null) {
+                classifySuitInRegion(sourceBitmap, abovePipRect, paperLum, rankRedRatio, upsideDown = true)
+            } else null
+
+            val (suit, suitConf, pipNormRect, isUpsideDown) = belowMatch ?: aboveMatch ?: continue
+
+            // 3. Seed-fill the white card rectangle starting from the paper next to rankBox
+            val cardNormBox = seedFillCardBox(
+                smallLum = smallLum,
+                smallChroma = smallChroma,
+                w = smallW,
+                h = smallH,
+                rankBox = rankBox,
+                srcW = srcW,
+                srcH = srcH,
+                paperLum = paperLum,
+                isUpsideDown = isUpsideDown
+            )
+
+            val cornerNorm = RectF(
+                min(rankBox.left / srcW.toFloat(), pipNormRect.left),
+                min(rankBox.top / srcH.toFloat(), pipNormRect.top),
+                max(rankBox.right / srcW.toFloat(), pipNormRect.right),
+                max(rankBox.bottom / srcH.toFloat(), pipNormRect.bottom)
+            )
+
+            val conf = (0.55f + suitConf * 0.40f).coerceIn(0.60f, 0.98f)
+            detections.add(
+                CardDetection(
+                    boundingBox = cardNormBox,
+                    rank = rank,
+                    suit = suit,
+                    confidence = conf,
+                    cornerBox = cornerNorm
+                )
+            )
+        }
+
+        return nonMaxSuppression(detections, iouThreshold = 0.35f)
+    }
+
+    private suspend fun recognizeText(bitmap: Bitmap) =
+        suspendCancellableCoroutine { cont ->
+            val image = InputImage.fromBitmap(bitmap, 0)
+            textRecognizer.process(image)
+                .addOnSuccessListener { result ->
+                    if (cont.isActive) cont.resume(result)
+                }
+                .addOnFailureListener {
+                    if (cont.isActive) cont.resume(null)
+                }
+        }
+
+    private fun parseCardRank(raw: String): CardRank? {
+        val t = raw.trim().uppercase()
+        return when (t) {
+            "A", "4A" -> CardRank.ACE
+            "2" -> CardRank.TWO
+            "3" -> CardRank.THREE
+            "4" -> CardRank.FOUR
+            "5" -> CardRank.FIVE
+            "6" -> CardRank.SIX
+            "7" -> CardRank.SEVEN
+            "8" -> CardRank.EIGHT
+            "9" -> CardRank.NINE
+            "10", "IO", "1O" -> CardRank.TEN
+            "J" -> CardRank.JACK
+            "Q" -> CardRank.QUEEN
+            "K" -> CardRank.KING
+            else -> null
+        }
+    }
+
+    private fun samplePaperLuminanceAround(bitmap: Bitmap, box: Rect): Int? {
+        val w = bitmap.width
+        val h = bitmap.height
+        val pad = max(4, box.width() / 2)
+        val left = (box.left - pad).coerceIn(0, w - 1)
+        val top = (box.top - pad).coerceIn(0, h - 1)
+        val right = (box.right + pad).coerceIn(left + 1, w)
+        val bottom = (box.bottom + pad).coerceIn(top + 1, h)
+
+        val rw = right - left
+        val rh = bottom - top
+        val px = IntArray(rw * rh)
+        bitmap.getPixels(px, 0, rw, left, top, rw, rh)
+
+        // Take 75th percentile luminance as paper white reference
+        val lums = IntArray(px.size)
+        for (i in px.indices) {
+            val c = px[i]
+            val r = (c shr 16) and 0xFF
+            val g = (c shr 8) and 0xFF
+            val b = c and 0xFF
+            lums[i] = (r * 77 + g * 150 + b * 29) shr 8
+        }
+        lums.sort()
+        return lums[(lums.size * 0.78f).toInt().coerceIn(0, lums.lastIndex)]
+    }
+
+    private fun measureRedRatio(bitmap: Bitmap, box: Rect, paperLum: Int): Float {
+        val l = box.left.coerceIn(0, bitmap.width - 1)
+        val t = box.top.coerceIn(0, bitmap.height - 1)
+        val r = box.right.coerceIn(l + 1, bitmap.width)
+        val b = box.bottom.coerceIn(t + 1, bitmap.height)
+        val rw = r - l
+        val rh = b - t
+        val px = IntArray(rw * rh)
+        bitmap.getPixels(px, 0, rw, l, t, rw, rh)
+
+        val inkLumThresh = (paperLum * 0.75f).toInt()
+        var inkCount = 0
+        var redCount = 0
+        for (c in px) {
+            val cr = (c shr 16) and 0xFF
+            val cg = (c shr 8) and 0xFF
+            val cb = c and 0xFF
+            val y = (cr * 77 + cg * 150 + cb * 29) shr 8
+            val redness = cr - max(cg, cb)
+            if (y < inkLumThresh || redness > 20) {
+                inkCount++
+                if (redness > 18) redCount++
+            }
+        }
+        return if (inkCount > 0) redCount.toFloat() / inkCount.toFloat() else 0f
+    }
+
+    private data class SuitMatchResult(
+        val suit: CardSuit,
+        val confidence: Float,
+        val pipNormBox: RectF,
+        val isUpsideDown: Boolean
+    )
+
+    private fun classifySuitInRegion(
+        bitmap: Bitmap,
+        pipRegion: Rect,
+        paperLum: Int,
+        rankRedRatio: Float,
+        upsideDown: Boolean
+    ): SuitMatchResult? {
+        val rw = pipRegion.width()
+        val rh = pipRegion.height()
+        if (rw < 6 || rh < 6) return null
+
+        val px = IntArray(rw * rh)
+        bitmap.getPixels(px, 0, rw, pipRegion.left, pipRegion.top, rw, rh)
+
+        val lum = IntArray(rw * rh)
+        val hist = IntArray(256)
+        for (i in px.indices) {
+            val c = px[i]
             val r = (c shr 16) and 0xFF
             val g = (c shr 8) and 0xFF
             val b = c and 0xFF
             val y = (r * 77 + g * 150 + b * 29) shr 8
             lum[i] = y
-            lumSum += y
+            hist[y]++
         }
 
-        val meanLum = (lumSum / pixels.size).toInt()
-        val whiteThreshold = (meanLum + 18).coerceIn(112, 162)
+        val otsu = computeOtsuThreshold(hist, rw * rh)
+        val inkThresh = min(otsu, (paperLum * 0.78f).toInt()).coerceIn(60, 170)
 
-        val mask = BooleanArray(w * h)
-        for (i in pixels.indices) {
-            val c = pixels[i]
+        val mask = BooleanArray(rw * rh)
+        var inkCount = 0
+        var redCount = 0
+        for (i in px.indices) {
+            val c = px[i]
             val r = (c shr 16) and 0xFF
             val g = (c shr 8) and 0xFF
             val b = c and 0xFF
-            val maxC = max(r, max(g, b))
-            val minC = min(r, min(g, b))
-            val chroma = maxC - minC
-            if (lum[i] >= whiteThreshold && chroma < 68) {
+            val redness = r - max(g, b)
+            if (lum[i] < inkThresh || redness > 22) {
                 mask[i] = true
+                inkCount++
+                if (redness > 18) redCount++
             }
         }
 
-        // Connected components on white-card mask
-        val visited = BooleanArray(w * h)
-        val queue = IntArray(w * h)
-        val frameArea = (w * h).toFloat()
-        val minCardArea = frameArea * 0.010f
-        val maxCardArea = frameArea * 0.45f
+        val regionArea = rw * rh
+        if (inkCount < max(8, (regionArea * 0.04f).toInt()) || inkCount > regionArea * 0.80f) {
+            return null
+        }
 
-        val rawDetections = ArrayList<CardDetection>()
+        // Find the largest connected ink blob in the pip region
+        val visited = BooleanArray(rw * rh)
+        val q = IntArray(rw * rh)
+        var bestRect: Rect? = null
+        var bestCount = 0
 
-        for (startIdx in mask.indices) {
-            if (!mask[startIdx] || visited[startIdx]) continue
-
+        for (i in mask.indices) {
+            if (!mask[i] || visited[i]) continue
             var head = 0
             var tail = 0
-            queue[tail++] = startIdx
-            visited[startIdx] = true
+            q[tail++] = i
+            visited[i] = true
+            var minX = rw
+            var maxX = 0
+            var minY = rh
+            var maxY = 0
+            var cnt = 0
+            while (head < tail) {
+                val p = q[head++]
+                val x = p % rw
+                val y = p / rw
+                cnt++
+                if (x < minX) minX = x
+                if (x > maxX) maxX = x
+                if (y < minY) minY = y
+                if (y > maxY) maxY = y
+                for (dy in -1..1) {
+                    for (dx in -1..1) {
+                        if (dx == 0 && dy == 0) continue
+                        val nx = x + dx
+                        val ny = y + dy
+                        if (nx in 0 until rw && ny in 0 until rh) {
+                            val ni = ny * rw + nx
+                            if (mask[ni] && !visited[ni]) {
+                                visited[ni] = true
+                                q[tail++] = ni
+                            }
+                        }
+                    }
+                }
+            }
+            if (cnt > bestCount) {
+                bestCount = cnt
+                bestRect = Rect(minX, minY, maxX + 1, maxY + 1)
+            }
+        }
+
+        val pipBox = bestRect ?: return null
+        if (pipBox.width() < 4 || pipBox.height() < 4) return null
+
+        val pipRedRatio = redCount.toFloat() / inkCount.toFloat()
+        val isRed = (rankRedRatio * 0.5f + pipRedRatio * 0.5f) > 0.22f
+
+        val patch = extractNormalizedPatch(mask, rw, pipBox, flip180 = upsideDown)
+        val (suit, score) = matchSuit(patch, isRed)
+
+        val normPip = RectF(
+            (pipRegion.left + pipBox.left) / bitmap.width.toFloat(),
+            (pipRegion.top + pipBox.top) / bitmap.height.toFloat(),
+            (pipRegion.left + pipBox.right) / bitmap.width.toFloat(),
+            (pipRegion.top + pipBox.bottom) / bitmap.height.toFloat()
+        )
+        return SuitMatchResult(suit, score, normPip, upsideDown)
+    }
+
+    private fun seedFillCardBox(
+        smallLum: IntArray,
+        smallChroma: IntArray,
+        w: Int,
+        h: Int,
+        rankBox: Rect,
+        srcW: Int,
+        srcH: Int,
+        paperLum: Int,
+        isUpsideDown: Boolean
+    ): RectF {
+        val sx = ((rankBox.centerX() / srcW.toFloat()) * w).toInt().coerceIn(0, w - 1)
+        val sy = ((rankBox.centerY() / srcH.toFloat()) * h).toInt().coerceIn(0, h - 1)
+
+        val whiteThresh = (paperLum * 0.72f).toInt().coerceIn(85, 165)
+
+        // Find nearest bright white seed pixel in a small window around rank center
+        var seedIdx = -1
+        for (dy in -4..4) {
+            for (dx in -4..4) {
+                val nx = (sx + dx).coerceIn(0, w - 1)
+                val ny = (sy + dy).coerceIn(0, h - 1)
+                val idx = ny * w + nx
+                if (smallLum[idx] >= whiteThresh && smallChroma[idx] < 72) {
+                    seedIdx = idx
+                    break
+                }
+            }
+            if (seedIdx >= 0) break
+        }
+
+        if (seedIdx >= 0) {
+            val visited = BooleanArray(w * h)
+            val q = IntArray(w * h)
+            var head = 0
+            var tail = 0
+            q[tail++] = seedIdx
+            visited[seedIdx] = true
 
             var minX = w
             var maxX = 0
             var minY = h
             var maxY = 0
             var count = 0
+            val maxPixels = (w * h * 0.42f).toInt()
 
-            while (head < tail) {
-                val idx = queue[head++]
+            while (head < tail && count < maxPixels) {
+                val idx = q[head++]
                 val x = idx % w
                 val y = idx / w
                 count++
@@ -157,237 +457,58 @@ object PlayingCardDetector {
 
                 if (x > 0) {
                     val n = idx - 1
-                    if (mask[n] && !visited[n]) {
+                    if (!visited[n] && smallLum[n] >= whiteThresh && smallChroma[n] < 72) {
                         visited[n] = true
-                        queue[tail++] = n
+                        q[tail++] = n
                     }
                 }
                 if (x + 1 < w) {
                     val n = idx + 1
-                    if (mask[n] && !visited[n]) {
+                    if (!visited[n] && smallLum[n] >= whiteThresh && smallChroma[n] < 72) {
                         visited[n] = true
-                        queue[tail++] = n
+                        q[tail++] = n
                     }
                 }
                 if (y > 0) {
                     val n = idx - w
-                    if (mask[n] && !visited[n]) {
+                    if (!visited[n] && smallLum[n] >= whiteThresh && smallChroma[n] < 72) {
                         visited[n] = true
-                        queue[tail++] = n
+                        q[tail++] = n
                     }
                 }
                 if (y + 1 < h) {
                     val n = idx + w
-                    if (mask[n] && !visited[n]) {
+                    if (!visited[n] && smallLum[n] >= whiteThresh && smallChroma[n] < 72) {
                         visited[n] = true
-                        queue[tail++] = n
+                        q[tail++] = n
                     }
                 }
             }
 
-            if (count < minCardArea || count > maxCardArea) continue
-
-            val bw = (maxX - minX + 1).toFloat()
-            val bh = (maxY - minY + 1).toFloat()
-            if (bw < 18f || bh < 22f) continue
-
-            val aspect = bw / bh
-            if (aspect < 0.40f || aspect > 2.2f) continue
-
-            // Reject irregular glare blobs that don't fill a rectangular card footprint
-            val fillRatio = count / (bw * bh)
-            if (fillRatio < 0.56f) continue
-
-            val normLeft = minX / w.toFloat()
-            val normTop = minY / h.toFloat()
-            val normRight = (maxX + 1) / w.toFloat()
-            val normBottom = (maxY + 1) / h.toFloat()
-
-            // Map back to full-resolution sourceBitmap for crisp corner index reading
-            val fullCardRect = Rect(
-                (normLeft * srcW).toInt().coerceIn(0, srcW - 1),
-                (normTop * srcH).toInt().coerceIn(0, srcH - 1),
-                (normRight * srcW).toInt().coerceIn(1, srcW),
-                (normBottom * srcH).toInt().coerceIn(1, srcH)
-            )
-
-            val classified = classifyFullResCorner(sourceBitmap, fullCardRect)
-            if (classified != null && classified.confidence >= 0.62f) {
-                rawDetections.add(
-                    classified.copy(boundingBox = RectF(normLeft, normTop, normRight, normBottom))
+            if (count > 120 && (maxX - minX) > 14 && (maxY - minY) > 18) {
+                return RectF(
+                    minX / w.toFloat(),
+                    minY / h.toFloat(),
+                    (maxX + 1) / w.toFloat(),
+                    (maxY + 1) / h.toFloat()
                 )
             }
         }
 
-        return nonMaxSuppression(rawDetections, iouThreshold = 0.45f)
-    }
-
-    private fun classifyFullResCorner(
-        sourceBitmap: Bitmap,
-        cardRect: Rect
-    ): CardDetection? {
-        val srcW = sourceBitmap.width
-        val srcH = sourceBitmap.height
-        val cw = cardRect.width()
-        val ch = cardRect.height()
-        if (cw < 24 || ch < 30) return null
-
-        // Crop top-left corner index region (skip outer 2px card border)
-        val padX = (cw * 0.02f).toInt().coerceAtLeast(1)
-        val padY = (ch * 0.02f).toInt().coerceAtLeast(1)
-        val cornerLeft = (cardRect.left + padX).coerceIn(0, srcW - 1)
-        val cornerTop = (cardRect.top + padY).coerceIn(0, srcH - 1)
-        val cornerRight = (cardRect.left + (cw * 0.34f).toInt()).coerceIn(cornerLeft + 8, srcW)
-        val cornerBottom = (cardRect.top + (ch * 0.42f).toInt()).coerceIn(cornerTop + 10, srcH)
-
-        val rw = cornerRight - cornerLeft
-        val rh = cornerBottom - cornerTop
-        if (rw < 8 || rh < 10) return null
-
-        val cornerPixels = IntArray(rw * rh)
-        sourceBitmap.getPixels(cornerPixels, 0, rw, cornerLeft, cornerTop, rw, rh)
-
-        val cornerLum = IntArray(rw * rh)
-        val hist = IntArray(256)
-        for (i in cornerPixels.indices) {
-            val c = cornerPixels[i]
-            val r = (c shr 16) and 0xFF
-            val g = (c shr 8) and 0xFF
-            val b = c and 0xFF
-            val y = (r * 77 + g * 150 + b * 29) shr 8
-            cornerLum[i] = y
-            hist[y]++
+        // Fallback: geometric card estimate anchored to corner rank
+        val rw = rankBox.width() / srcW.toFloat()
+        val rh = rankBox.height() / srcH.toFloat()
+        val cardW = (rw * 4.5f).coerceIn(0.08f, 0.45f)
+        val cardH = (rh * 6.5f).coerceIn(0.12f, 0.65f)
+        return if (!isUpsideDown) {
+            val left = (rankBox.left / srcW.toFloat() - rw * 0.25f).coerceIn(0f, 1f)
+            val top = (rankBox.top / srcH.toFloat() - rh * 0.25f).coerceIn(0f, 1f)
+            RectF(left, top, (left + cardW).coerceAtMost(1f), (top + cardH).coerceAtMost(1f))
+        } else {
+            val right = (rankBox.right / srcW.toFloat() + rw * 0.25f).coerceIn(0f, 1f)
+            val bottom = (rankBox.bottom / srcH.toFloat() + rh * 0.25f).coerceIn(0f, 1f)
+            RectF((right - cardW).coerceAtLeast(0f), (bottom - cardH).coerceAtLeast(0f), right, bottom)
         }
-
-        // Compute Otsu's bimodal threshold separating white card paper from dark/red ink
-        val otsuThresh = computeOtsuThreshold(hist, rw * rh).coerceIn(70, 175)
-
-        val inkMask = BooleanArray(rw * rh)
-        var redScoreCount = 0
-        var totalInkCount = 0
-
-        for (i in cornerPixels.indices) {
-            val c = cornerPixels[i]
-            val r = (c shr 16) and 0xFF
-            val g = (c shr 8) and 0xFF
-            val b = c and 0xFF
-            val redness = r - max(g, b)
-            val isInk = cornerLum[i] < otsuThresh || redness > 24
-            if (isInk) {
-                inkMask[i] = true
-                totalInkCount++
-                if (redness > 20) redScoreCount++
-            }
-        }
-
-        val cornerArea = rw * rh
-        // Require a sensible ink density (reject blank glare or solid dark shadows)
-        if (totalInkCount < 14 || totalInkCount > cornerArea * 0.65f) return null
-        val isRed = redScoreCount.toFloat() / totalInkCount.toFloat() > 0.22f
-
-        // Segment connected ink blobs
-        val visited = BooleanArray(rw * rh)
-        val q = IntArray(rw * rh)
-        val blobs = ArrayList<Rect>()
-        val minBlobPixels = (cornerArea * 0.008f).toInt().coerceAtLeast(6)
-
-        for (i in inkMask.indices) {
-            if (!inkMask[i] || visited[i]) continue
-            var head = 0
-            var tail = 0
-            q[tail++] = i
-            visited[i] = true
-
-            var bMinX = rw
-            var bMaxX = 0
-            var bMinY = rh
-            var bMaxY = 0
-            var bCount = 0
-
-            while (head < tail) {
-                val p = q[head++]
-                val px = p % rw
-                val py = p / rw
-                bCount++
-                if (px < bMinX) bMinX = px
-                if (px > bMaxX) bMaxX = px
-                if (py < bMinY) bMinY = py
-                if (py > bMaxY) bMaxY = py
-
-                for (dy in -1..1) {
-                    for (dx in -1..1) {
-                        if (dx == 0 && dy == 0) continue
-                        val nx = px + dx
-                        val ny = py + dy
-                        if (nx in 0 until rw && ny in 0 until rh) {
-                            val ni = ny * rw + nx
-                            if (inkMask[ni] && !visited[ni]) {
-                                visited[ni] = true
-                                q[tail++] = ni
-                            }
-                        }
-                    }
-                }
-            }
-
-            val bw = bMaxX - bMinX + 1
-            val bh = bMaxY - bMinY + 1
-            // Filter out tiny specks and ultra-thin edge lines
-            if (bCount >= minBlobPixels && bw >= 3 && bh >= 4) {
-                blobs.add(Rect(bMinX, bMinY, bMaxX + 1, bMaxY + 1))
-            }
-        }
-
-        // Require at least 2 distinct blobs (Rank + Suit pip) to reject table glare
-        if (blobs.size < 2) return null
-
-        blobs.sortBy { it.top }
-
-        // Topmost glyph(s) form Rank; merge "1" and "0" if side-by-side on the top row
-        val topBlob = blobs[0]
-        val rankRect = Rect(topBlob)
-        var suitBlobIndex = 1
-        if (blobs.size >= 3) {
-            val second = blobs[1]
-            val sameRow = abs(second.top - topBlob.top) <= max(4, topBlob.height() / 2)
-            val horizontallyClose = abs(second.left - topBlob.right) <= max(6, topBlob.width())
-            if (sameRow && horizontallyClose) {
-                rankRect.union(second)
-                suitBlobIndex = 2
-            }
-        }
-
-        if (suitBlobIndex >= blobs.size) return null
-
-        // Pick the suit pip directly below the rank (aligned horizontally)
-        val rankCenterX = rankRect.centerX()
-        val suitRect = blobs.subList(suitBlobIndex, blobs.size)
-            .filter { it.top >= rankRect.top + rankRect.height() / 3 }
-            .minByOrNull { abs(it.centerX() - rankCenterX) + (it.top - rankRect.bottom).coerceAtLeast(0) }
-            ?: return null
-
-        val rankPatch = extractNormalizedPatch(inkMask, rw, rankRect)
-        val (bestRank, rankScore) = matchRank(rankPatch)
-
-        val suitPatch = extractNormalizedPatch(inkMask, rw, suitRect)
-        val (bestSuit, suitScore) = matchSuit(suitPatch, isRed)
-
-        val combinedConfidence = (rankScore * 0.55f + suitScore * 0.45f).coerceIn(0f, 0.99f)
-
-        val normCorner = RectF(
-            (cornerLeft + min(rankRect.left, suitRect.left)) / srcW.toFloat(),
-            (cornerTop + rankRect.top) / srcH.toFloat(),
-            (cornerLeft + max(rankRect.right, suitRect.right)) / srcW.toFloat(),
-            (cornerTop + suitRect.bottom) / srcH.toFloat()
-        )
-
-        return CardDetection(
-            boundingBox = RectF(),
-            rank = bestRank,
-            suit = bestSuit,
-            confidence = combinedConfidence,
-            cornerBox = normCorner
-        )
     }
 
     private fun computeOtsuThreshold(hist: IntArray, total: Int): Int {
@@ -415,7 +536,12 @@ object PlayingCardDetector {
         return threshold
     }
 
-    private fun extractNormalizedPatch(mask: BooleanArray, maskW: Int, rect: Rect): FloatArray {
+    private fun extractNormalizedPatch(
+        mask: BooleanArray,
+        maskW: Int,
+        rect: Rect,
+        flip180: Boolean = false
+    ): FloatArray {
         val patch = FloatArray(TEMPLATE_LEN)
         val srcW = rect.width().coerceAtLeast(1)
         val srcH = rect.height().coerceAtLeast(1)
@@ -434,7 +560,9 @@ object PlayingCardDetector {
                 val sx = ((tx - offX) / scale).toInt()
                 val sy = ((ty - offY) / scale).toInt()
                 if (sx in 0 until srcW && sy in 0 until srcH) {
-                    val idx = (rect.top + sy) * maskW + (rect.left + sx)
+                    val rx = if (flip180) (srcW - 1 - sx) else sx
+                    val ry = if (flip180) (srcH - 1 - sy) else sy
+                    val idx = (rect.top + ry) * maskW + (rect.left + rx)
                     patch[ty * TEMPLATE_SIZE + tx] = if (mask[idx]) 1f else 0f
                 }
             }
@@ -442,22 +570,7 @@ object PlayingCardDetector {
         return patch
     }
 
-    private fun matchRank(patch: FloatArray): Pair<CardRank, Float> {
-        var bestRank = CardRank.ACE
-        var bestScore = -1f
-        for ((rank, tmpl) in rankTemplates) {
-            val ncc = normalizedCrossCorrelation(patch, tmpl)
-            if (ncc > bestScore) {
-                bestScore = ncc
-                bestRank = rank
-            }
-        }
-        val conf = ((bestScore + 1f) * 0.5f).coerceIn(0f, 1f)
-        return Pair(bestRank, conf)
-    }
-
     private fun matchSuit(patch: FloatArray, isRed: Boolean): Pair<CardSuit, Float> {
-        // Compute geometric shape cues on the 16x16 suit patch
         val topWidth = rowSpanWidth(patch, 2..4)
         val midWidth = rowSpanWidth(patch, 6..9)
         val botWidth = rowSpanWidth(patch, 11..13)
@@ -476,10 +589,10 @@ object PlayingCardDetector {
             val tmpl = suitTemplates[suit] ?: continue
             val ncc = normalizedCrossCorrelation(patch, tmpl)
             val geomBonus = when (suit) {
-                CardSuit.SPADES -> if (topWidth < midWidth * 0.72f) 0.14f else -0.06f
-                CardSuit.CLUBS -> if (topWidth >= midWidth * 0.68f) 0.10f else -0.04f
-                CardSuit.HEARTS -> if (topWidth > botWidth * 1.15f && topCenterInk < 0.7f) 0.14f else -0.04f
-                CardSuit.DIAMONDS -> if (midWidth >= topWidth * 1.15f && midWidth >= botWidth * 1.15f) 0.14f else -0.04f
+                CardSuit.SPADES -> if (topWidth < midWidth * 0.72f) 0.16f else -0.06f
+                CardSuit.CLUBS -> if (topWidth >= midWidth * 0.68f) 0.12f else -0.04f
+                CardSuit.HEARTS -> if (topWidth > botWidth * 1.15f && topCenterInk < 0.7f) 0.16f else -0.04f
+                CardSuit.DIAMONDS -> if (midWidth >= topWidth * 1.15f && midWidth >= botWidth * 1.15f) 0.16f else -0.04f
             }
             val score = ncc + geomBonus
             if (score > bestCombined) {
@@ -503,9 +616,7 @@ object PlayingCardDetector {
                     if (x > maxX) maxX = x
                 }
             }
-            if (maxX >= minX) {
-                totalSpan += (maxX - minX + 1)
-            }
+            if (maxX >= minX) totalSpan += (maxX - minX + 1)
             count++
         }
         return if (count > 0) totalSpan / count else 0f
@@ -533,29 +644,6 @@ object PlayingCardDetector {
         }
         val denom = sqrt(denA * denB)
         return if (denom > 1e-5f) num / denom else 0f
-    }
-
-    private fun buildRankTemplates(): Map<CardRank, FloatArray> {
-        val map = HashMap<CardRank, FloatArray>()
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 14f
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-            textAlign = Paint.Align.CENTER
-        }
-        for (rank in CardRank.entries) {
-            val bmp = Bitmap.createBitmap(TEMPLATE_SIZE, TEMPLATE_SIZE, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bmp)
-            canvas.drawColor(Color.BLACK)
-            val bounds = Rect()
-            paint.getTextBounds(rank.symbol, 0, rank.symbol.length, bounds)
-            val x = TEMPLATE_SIZE / 2f
-            val y = TEMPLATE_SIZE / 2f - bounds.exactCenterY()
-            canvas.drawText(rank.symbol, x, y, paint)
-            map[rank] = bitmapToNormalizedArray(bmp)
-            bmp.recycle()
-        }
-        return map
     }
 
     private fun buildSuitTemplates(): Map<CardSuit, FloatArray> {
